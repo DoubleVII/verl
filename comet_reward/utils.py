@@ -474,4 +474,6 @@ def get_bleu_penalty(
 
     # 计算最终惩罚
     bleu_penalty = [(s + r) * scale for s, r in zip(src_cross_bleu, ref_cross_bleu)]
+
+    print("[Info] bleu penalty avg: {}".format(sum(bleu_penalty) / len(bleu_penalty)))
     return bleu_penalty
