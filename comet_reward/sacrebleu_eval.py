@@ -22,9 +22,3 @@ def main(mt_path: str, ref_path: str, trg_lang: str = "") -> Dict:
         ref_list = [line.strip() for line in f_ref]
     return func_call(mt_list, ref_list, trg_lang)
 
-
-
-if __name__ == "__main__":
-    from eval import CLI
-
-    CLI(main)
