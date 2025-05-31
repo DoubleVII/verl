@@ -17,26 +17,27 @@ import time
 from typing import List, Literal
 import requests
 
+
 def get_rewards_from_server(
-        src_langs: List[str],
-        trg_langs: List[str],
-        ref_langs: List[str],
-        src_texts: List[str],
-        ref_texts: List[str],
-        response_texts: List[str],
-        rm_type: Literal["direct", "pivot", "msr"] = "direct",
-        server_url: str = None,
-        batch_size: int = 128,
-        ) -> List[float]:
+    src_langs: List[str],
+    trg_langs: List[str],
+    ref_langs: List[str],
+    src_texts: List[str],
+    ref_texts: List[str],
+    response_texts: List[str],
+    rm_type: Literal["direct", "pivot", "msr"] = "direct",
+    server_url: str = None,
+    batch_size: int = 128,
+) -> List[float]:
     r"""
     Gets reward scores from the API server by splitting requests into batches.
     """
     if server_url is None:
         server_url = SERVER_URL
-    
+
     total_items = len(src_texts)
     all_rewards = []
-    
+
     # 处理单个批次的请求（包含重试逻辑）
     def _request_single_batch(batch_indices):
         batch_payload = {
@@ -48,14 +49,19 @@ def get_rewards_from_server(
             "ref_langs": [ref_langs[i] for i in batch_indices],
             "rm_type": rm_type,
         }
-        
+
         print(f"[Request] remote reward request batch size: {len(batch_indices)}")
         max_retries = 5
         backoff_factor = 5
 
         for attempt in range(max_retries):
             try:
-                response = requests.post(server_url, json=batch_payload, headers={"Content-Type": "application/json"}, timeout=40)
+                response = requests.post(
+                    server_url,
+                    json=batch_payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=40,
+                )
                 response.raise_for_status()
                 return response.json()["scores"]
             except Exception as e:
@@ -63,19 +69,24 @@ def get_rewards_from_server(
                     # 仅在最终失败时保存错误批次
                     with open("/opt/tiger/error.json", "w") as f:
                         import json
+
                         json.dump(batch_payload, f, ensure_ascii=False, indent=4)
-                    raise RuntimeError(f"Batch request failed after {max_retries} attempts") from e
-                wait_time = backoff_factor * (2 ** attempt)
-                print(f"Request failed (batch size {len(batch_indices)}). Retrying in {wait_time} seconds...")
+                    raise RuntimeError(
+                        f"Batch request failed after {max_retries} attempts"
+                    ) from e
+                wait_time = backoff_factor * (2**attempt)
+                print(
+                    f"Request failed (batch size {len(batch_indices)}). Retrying in {wait_time} seconds..."
+                )
                 time.sleep(wait_time)
-    
+
     # 分批处理所有数据
     for start_idx in range(0, total_items, batch_size):
         end_idx = min(start_idx + batch_size, total_items)
         batch_indices = list(range(start_idx, end_idx))
         batch_rewards = _request_single_batch(batch_indices)
         all_rewards.extend(batch_rewards)
-    
+
     return all_rewards
 
 
@@ -90,51 +101,72 @@ def format_checker(solution_strs: str, forbidden_tags: list[str]) -> bool:
 
 def extract_translation(solution_strs: str):
     """Extracts the final answer from the model's response string.
-    
+
     Args:
         solution_strs: Raw response string from the language model
-        
+
     Returns:
         extracted_answer
     """
     # Extract final answer using XML-style tags
-    answer_pattern = r'<translate>(.*?)</translate>'
+    answer_pattern = r"<translate>(.*?)</translate>"
     matches = list(re.finditer(answer_pattern, solution_strs, re.DOTALL))
-    
+
     if not matches:
         # print("[Error] No valid answer tags found")
         return None
-        
+
     final_answer = matches[-1].group(1).strip()
 
-    if format_checker(final_answer, ["<think>", "<translate>", "</think>", "</translate>"]):
+    if format_checker(
+        final_answer, ["<think>", "<translate>", "</think>", "</translate>"]
+    ):
         return final_answer
     return None
 
-def compute_score(data_sources, solution_strs, ground_truths, extra_infos=None, batch_size=128, server_url:str = None):
+
+def compute_score(
+    data_sources,
+    solution_strs,
+    ground_truths,
+    extra_infos=None,
+    batch_size=128,
+    server_url: str = None,
+    use_extract_translation: bool = True,
+):
     """
-        batch compute score
+    batch compute score
     """
 
     assert extra_infos is not None
 
-    assert isinstance(data_sources, Iterable) and isinstance(solution_strs, Iterable) and isinstance(ground_truths, Iterable) and isinstance(extra_infos, Iterable)
-    assert len(data_sources) == len(solution_strs) == len(ground_truths) == len(extra_infos)
-    
+    assert (
+        isinstance(data_sources, Iterable)
+        and isinstance(solution_strs, Iterable)
+        and isinstance(ground_truths, Iterable)
+        and isinstance(extra_infos, Iterable)
+    )
+    assert (
+        len(data_sources)
+        == len(solution_strs)
+        == len(ground_truths)
+        == len(extra_infos)
+    )
 
     # 提取翻译结果，可能包含None
-    solution_strs = [extract_translation(s) for s in solution_strs]
-    
+    if use_extract_translation:
+        solution_strs = [extract_translation(s) for s in solution_strs]
+
     # 提取辅助信息
-    src_text = [extra_infos_item['src_text'] for extra_infos_item in extra_infos]
-    tgt_text = [extra_infos_item['tgt_text'] for extra_infos_item in extra_infos]
-    lg = [extra_infos_item['lang_pair'] for extra_infos_item in extra_infos]
-    src_lang = [l.split('-')[0] for l in lg]
-    trg_lang = [l.split('-')[1] for l in lg]
-    
+    src_text = [extra_infos_item["src_text"] for extra_infos_item in extra_infos]
+    tgt_text = [extra_infos_item["tgt_text"] for extra_infos_item in extra_infos]
+    lg = [extra_infos_item["lang_pair"] for extra_infos_item in extra_infos]
+    src_lang = [l.split("-")[0] for l in lg]
+    trg_lang = [l.split("-")[1] for l in lg]
+
     # 初始化全0分数列表
     scores = [0] * len(solution_strs)
-    
+
     # 筛选非None的索引和对应数据
     non_none_indices = [i for i, s in enumerate(solution_strs) if s is not None]
     non_none_src_lang = [src_lang[i] for i in non_none_indices]
@@ -142,7 +174,7 @@ def compute_score(data_sources, solution_strs, ground_truths, extra_infos=None, 
     non_none_src_text = [src_text[i] for i in non_none_indices]
     non_none_tgt_text = [tgt_text[i] for i in non_none_indices]
     non_none_solution_strs = [solution_strs[i] for i in non_none_indices]
-    
+
     # 仅对非None条目获取分数
     if non_none_solution_strs:
         non_none_scores = get_rewards_from_server(
@@ -156,30 +188,35 @@ def compute_score(data_sources, solution_strs, ground_truths, extra_infos=None, 
             server_url=server_url,
             batch_size=batch_size,
         )
-        
+
         # 归一化分数并更新到对应位置
         normalized_scores = [score_normalize(s, 0, 1) for s in non_none_scores]
         for idx, score in zip(non_none_indices, normalized_scores):
             scores[idx] = score
-    
+
     return scores
-
-
 
 
 def extract_translation_progressive(solution_strs: str) -> tuple[str, str]:
     """Extracts the final answer from the model's response string.
-    
+
     Args:
         solution_strs: Raw response string from the language model
-        
+
     Returns:
         extracted_answer
     """
-    forbidden_tags = ["<draft>", "<translation>", "</draft>", "</translation>", "<analysis>", "</analysis>"]
+    forbidden_tags = [
+        "<draft>",
+        "<translation>",
+        "</draft>",
+        "</translation>",
+        "<analysis>",
+        "</analysis>",
+    ]
     # Extract final answer using XML-style tags
-    draft_pattern = r'<draft>(.*?)</draft>'
-    answer_pattern = r'<translation>(.*?)</translation>'
+    draft_pattern = r"<draft>(.*?)</draft>"
+    answer_pattern = r"<translation>(.*?)</translation>"
     draft_matches = list(re.finditer(draft_pattern, solution_strs, re.DOTALL))
 
     if not draft_matches:
@@ -188,16 +225,16 @@ def extract_translation_progressive(solution_strs: str) -> tuple[str, str]:
         draft_text = draft_matches[-1].group(1).strip()
         if not format_checker(draft_text, forbidden_tags):
             draft_text = None
-    
+
     answer_matches = list(re.finditer(answer_pattern, solution_strs, re.DOTALL))
-    
+
     if not answer_matches:
         answer_text = None
     else:
         answer_text = answer_matches[-1].group(1).strip()
         if not format_checker(answer_text, forbidden_tags):
             answer_text = None
-    
+
     return draft_text, answer_text
 
 
@@ -208,9 +245,9 @@ def delta_plus_score(draft_score, answer_score, gamma=1.0):
     """
     draft_score = score_normalize(draft_score, 0, 1)
     answer_score = score_normalize(answer_score, 0, 1)
-    
+
     delta = answer_score - draft_score
-    return delta/(1.1-draft_score) + gamma*draft_score
+    return delta / (1.1 - draft_score) + gamma * draft_score
 
 
 def delta_plus_plus_score(draft_score, answer_score):
@@ -220,9 +257,9 @@ def delta_plus_plus_score(draft_score, answer_score):
     """
     draft_score = score_normalize(draft_score, 0, 1)
     answer_score = score_normalize(answer_score, 0, 1)
-    
+
     delta = answer_score - draft_score
-    return delta/(1.1-draft_score) * draft_score
+    return delta / (1.1 - draft_score) * draft_score
 
 
 def sum_score(draft_score, answer_score):
@@ -231,18 +268,29 @@ def sum_score(draft_score, answer_score):
 
     return draft_score + answer_score
 
+
 def final_score(draft_score, answer_score):
     # draft_score = score_normalize(draft_score, 0, 1)
     answer_score = score_normalize(answer_score, 0, 1)
     return answer_score
 
 
-def compute_score_progressive(data_sources, solution_strs, ground_truths, extra_infos=None, batch_size=128, fusion_type:str = "delta+", server_url:str = None):
+def compute_score_progressive(
+    data_sources,
+    solution_strs,
+    ground_truths,
+    extra_infos=None,
+    batch_size=128,
+    fusion_type: str = "delta+",
+    server_url: str = None,
+    use_extract_translation: bool = True,
+):
     """
-        batch compute score
+    batch compute score
     """
 
     assert fusion_type in ["delta+", "delta++", "sum", "final"]
+    assert use_extract_translation
 
     if fusion_type == "delta+":
         fusion_fn = delta_plus_score
@@ -252,27 +300,35 @@ def compute_score_progressive(data_sources, solution_strs, ground_truths, extra_
         fusion_fn = sum_score
     elif fusion_type == "final":
         fusion_fn = final_score
-    
+
     assert extra_infos is not None
 
-    assert isinstance(data_sources, Iterable) and isinstance(solution_strs, Iterable) and isinstance(ground_truths, Iterable) and isinstance(extra_infos, Iterable)
-    assert len(data_sources) == len(solution_strs) == len(ground_truths) == len(extra_infos)
-    
+    assert (
+        isinstance(data_sources, Iterable)
+        and isinstance(solution_strs, Iterable)
+        and isinstance(ground_truths, Iterable)
+        and isinstance(extra_infos, Iterable)
+    )
+    assert (
+        len(data_sources)
+        == len(solution_strs)
+        == len(ground_truths)
+        == len(extra_infos)
+    )
 
     # 提取翻译结果，可能包含None
     solution_strs_tuples = [extract_translation_progressive(s) for s in solution_strs]
-    
-    
+
     # 提取辅助信息
-    src_text = [extra_infos_item['src_text'] for extra_infos_item in extra_infos]
-    tgt_text = [extra_infos_item['tgt_text'] for extra_infos_item in extra_infos]
-    lg = [extra_infos_item['lang_pair'] for extra_infos_item in extra_infos]
-    src_lang = [l.split('-')[0] for l in lg]
-    trg_lang = [l.split('-')[1] for l in lg]
-    
+    src_text = [extra_infos_item["src_text"] for extra_infos_item in extra_infos]
+    tgt_text = [extra_infos_item["tgt_text"] for extra_infos_item in extra_infos]
+    lg = [extra_infos_item["lang_pair"] for extra_infos_item in extra_infos]
+    src_lang = [l.split("-")[0] for l in lg]
+    trg_lang = [l.split("-")[1] for l in lg]
+
     # 初始化全0分数列表
     scores = [0] * len(solution_strs_tuples)
-    
+
     non_none_indices = []
     # 筛选非None的索引和对应数据
     for i, t in enumerate(solution_strs_tuples):
@@ -286,7 +342,7 @@ def compute_score_progressive(data_sources, solution_strs, ground_truths, extra_
     non_none_tgt_text = [tgt_text[i] for i in non_none_indices]
     non_none_draft_strs = [solution_strs_tuples[i][0] for i in non_none_indices]
     non_none_answer_strs = [solution_strs_tuples[i][1] for i in non_none_indices]
-    
+
     # 仅对非None条目获取分数
     if non_none_draft_strs:
         non_none_draft_scores = get_rewards_from_server(
@@ -301,8 +357,6 @@ def compute_score_progressive(data_sources, solution_strs, ground_truths, extra_
             batch_size=batch_size,
         )
 
-        
-
         non_none_answer_scores = get_rewards_from_server(
             src_langs=non_none_src_lang,
             trg_langs=non_none_trg_lang,
@@ -315,14 +369,26 @@ def compute_score_progressive(data_sources, solution_strs, ground_truths, extra_
             batch_size=batch_size,
         )
 
-        print("[Info] draft score avg: ", sum(non_none_draft_scores)/len(non_none_draft_scores))
-        print("[Info] answer score avg: ", sum(non_none_answer_scores)/len(non_none_answer_scores))
-        print("[Info] delta score avg: ", (sum(non_none_answer_scores)-sum(non_none_draft_scores))/len(non_none_answer_scores))
+        print(
+            "[Info] draft score avg: ",
+            sum(non_none_draft_scores) / len(non_none_draft_scores),
+        )
+        print(
+            "[Info] answer score avg: ",
+            sum(non_none_answer_scores) / len(non_none_answer_scores),
+        )
+        print(
+            "[Info] delta score avg: ",
+            (sum(non_none_answer_scores) - sum(non_none_draft_scores))
+            / len(non_none_answer_scores),
+        )
 
-        
-        final_score = [fusion_fn(d, a) for d, a in zip(non_none_draft_scores, non_none_answer_scores)]
-        
+        final_score = [
+            fusion_fn(d, a)
+            for d, a in zip(non_none_draft_scores, non_none_answer_scores)
+        ]
+
         for idx, score in zip(non_none_indices, final_score):
             scores[idx] = score
-    
+
     return scores
