@@ -8,8 +8,6 @@ def func_call(mt_list, ref_list, trg_lang: str = "", lowercase: bool = False):
     bleu = BLEU(lowercase=lowercase, trg_lang=trg_lang, effective_order=True)
     corpus_score = bleu.corpus_score(mt_list, [ref_list])
 
-    print("BLEU: ", corpus_score)
-
     sentence_scores = []
     for sys_sentence, ref_sentence in zip(mt_list, ref_list):
         sentence_scores.append(bleu.sentence_score(sys_sentence, [ref_sentence]).score)

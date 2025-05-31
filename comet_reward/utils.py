@@ -453,8 +453,6 @@ def get_bleu_penalty(
     # 初始化结果列表
     src_cross_bleu = [0] * len(mt_list)
 
-    print(zh_indices)
-
     # 处理中文组
     if zh_indices:
         zh_mt = [mt_list[i] for i in zh_indices]
