@@ -111,7 +111,7 @@ def extract_translation(solution_strs: str):
         return final_answer
     return None
 
-def compute_score(data_sources, solution_strs, ground_truths, extra_infos=None, batch_size=128):
+def compute_score(data_sources, solution_strs, ground_truths, extra_infos=None, batch_size=128, server_url:str = None):
     """
         batch compute score
     """
@@ -153,7 +153,7 @@ def compute_score(data_sources, solution_strs, ground_truths, extra_infos=None, 
             ref_texts=non_none_tgt_text,
             response_texts=non_none_solution_strs,
             rm_type="direct",
-            server_url=None,
+            server_url=server_url,
             batch_size=batch_size,
         )
         
@@ -297,7 +297,7 @@ def compute_score_progressive(data_sources, solution_strs, ground_truths, extra_
             ref_texts=non_none_tgt_text,
             response_texts=non_none_draft_strs,
             rm_type="direct",
-            server_url=None,
+            server_url=server_url,
             batch_size=batch_size,
         )
 
