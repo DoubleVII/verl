@@ -213,7 +213,7 @@ def delta_plus_score(draft_score, answer_score, gamma=1.0):
     return delta/(1.1-draft_score) + gamma*draft_score
 
 
-def delta_plus_plus_score(draft_score, answer_score, gamma=1.0):
+def delta_plus_plus_score(draft_score, answer_score):
     """
     $\frac{s_a-s_d}{1.1-s_d}*s_d$
     Combining the improve reward and draft reward together by multiplying.
@@ -222,7 +222,7 @@ def delta_plus_plus_score(draft_score, answer_score, gamma=1.0):
     answer_score = score_normalize(answer_score, 0, 1)
     
     delta = answer_score - draft_score
-    return delta/(1.1-draft_score) + gamma*draft_score
+    return delta/(1.1-draft_score) * draft_score
 
 
 def sum_score(draft_score, answer_score):
