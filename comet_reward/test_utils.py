@@ -73,4 +73,41 @@ def test_compute_score_progressive():
 
     print(scores)
 
-test_compute_score_progressive()
+
+
+def test_get_bleu_penalty():
+    mt_texts = [
+        'Девочка была очень похожа на свою мать, с голубыми глазами и белыми волосами, украшенными синими лентами. Ледяной Король думал, что рождение дочери сделает его слабым. В конце концов, до сих пор у него были только сыновья.',
+        'Девочка была очень похожа на свою мать, с голубыми глазами и белыми волосами, украшенными синими лентами. 冰之王 Король думал, что рождение дочери сделает его слабым. В конце концов, до сих пор у него были только сыновья.',
+        'The girl looked very much like her mother, with blue eyes and white hair adorned with blue ribbons. The Ice King thought that having a daughter would make him weak. After all, he had only had sons so far.',
+        '1+ 西索的陆地、水描绘中心新画廊展览',
+        'Siso 的陆地、水描绘 center 新画廊展览',
+        "New Gallery Exhibit at Cecil's Land, Water Depictions of land Center"
+        ]
+    src_texts = [
+        '那个女孩长相很像她的母亲，有着浅蓝色的眼睛和白色的头发，上面还点缀着蓝色的丝带。冰之王认为有了女儿会使他显得软弱。毕竟，直到现在他只有儿子。',
+        '那个女孩长相很像她的母亲，有着浅蓝色的眼睛和白色的头发，上面还点缀着蓝色的丝带。冰之王认为有了女儿会使他显得软弱。毕竟，直到现在他只有儿子。',
+        '那个女孩长相很像她的母亲，有着浅蓝色的眼睛和白色的头发，上面还点缀着蓝色的丝带。冰之王认为有了女儿会使他显得软弱。毕竟，直到现在他只有儿子。',
+        'Изображения земли и воды Сисо в новой галерее выставки',
+        'Изображения земли и воды Сисо в новой галерее выставки',
+        'Изображения земли и воды Сисо в новой галерее выставки',
+    ]
+    ref_texts = [
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        "1+ Siso's depictions of land, water center new gallery exhibition",
+        "Siso's depictions of land, water center new gallery exhibition",
+        "Siso's depictions of land, water center new gallery exhibition",
+        ]
+    src_langs = [
+        'zh',
+        'zh',
+        'zh',
+        'ru',
+        'ru',
+        'ru',
+    ]
+    print(utils.get_bleu_penalty(mt_texts, src_texts, ref_texts, src_langs))
+
+test_get_bleu_penalty()

@@ -133,6 +133,7 @@ def compute_score(
     batch_size=128,
     server_url: str = None,
     use_extract_translation: bool = True,
+    use_bleu_penalty: bool = False,
 ):
     """
     batch compute score
@@ -172,7 +173,7 @@ def compute_score(
     non_none_src_lang = [src_lang[i] for i in non_none_indices]
     non_none_trg_lang = [trg_lang[i] for i in non_none_indices]
     non_none_src_text = [src_text[i] for i in non_none_indices]
-    non_none_tgt_text = [tgt_text[i] for i in non_none_indices]
+    non_none_trg_text = [tgt_text[i] for i in non_none_indices]
     non_none_solution_strs = [solution_strs[i] for i in non_none_indices]
 
     # 仅对非None条目获取分数
@@ -182,7 +183,7 @@ def compute_score(
             trg_langs=non_none_trg_lang,
             ref_langs=non_none_trg_lang,
             src_texts=non_none_src_text,
-            ref_texts=non_none_tgt_text,
+            ref_texts=non_none_trg_text,
             response_texts=non_none_solution_strs,
             rm_type="direct",
             server_url=server_url,
@@ -191,6 +192,17 @@ def compute_score(
 
         # 归一化分数并更新到对应位置
         normalized_scores = [score_normalize(s, 0, 1) for s in non_none_scores]
+        if use_bleu_penalty:
+            penalty_scores = get_bleu_penalty(
+                non_none_solution_strs,
+                non_none_src_text,
+                non_none_trg_text,
+                non_none_src_lang,
+            )
+            normalized_scores = [
+                s - p for s, p in zip(normalized_scores, penalty_scores)
+            ]
+
         for idx, score in zip(non_none_indices, normalized_scores):
             scores[idx] = score
 
@@ -339,7 +351,7 @@ def compute_score_progressive(
     non_none_src_lang = [src_lang[i] for i in non_none_indices]
     non_none_trg_lang = [trg_lang[i] for i in non_none_indices]
     non_none_src_text = [src_text[i] for i in non_none_indices]
-    non_none_tgt_text = [tgt_text[i] for i in non_none_indices]
+    non_none_trg_text = [tgt_text[i] for i in non_none_indices]
     non_none_draft_strs = [solution_strs_tuples[i][0] for i in non_none_indices]
     non_none_answer_strs = [solution_strs_tuples[i][1] for i in non_none_indices]
 
@@ -350,7 +362,7 @@ def compute_score_progressive(
             trg_langs=non_none_trg_lang,
             ref_langs=non_none_trg_lang,
             src_texts=non_none_src_text,
-            ref_texts=non_none_tgt_text,
+            ref_texts=non_none_trg_text,
             response_texts=non_none_draft_strs,
             rm_type="direct",
             server_url=server_url,
@@ -362,7 +374,7 @@ def compute_score_progressive(
             trg_langs=non_none_trg_lang,
             ref_langs=non_none_trg_lang,
             src_texts=non_none_src_text,
-            ref_texts=non_none_tgt_text,
+            ref_texts=non_none_trg_text,
             response_texts=non_none_answer_strs,
             rm_type="direct",
             server_url=server_url,
@@ -392,3 +404,76 @@ def compute_score_progressive(
             scores[idx] = score
 
     return scores
+
+
+def replace_numbers_and_operators(input_string):
+    # 定义正则表达式模式，匹配数字和数学运算符
+    pattern = r"[0-9+\-*/=()]"
+    # 使用re.sub将匹配的字符替换为空格
+    result = re.sub(pattern, "@", input_string)
+    return result
+
+
+PAD_STR = " [PxAxD]" * 50
+PAD_STR = "{}" + PAD_STR
+
+
+def add_padding(input_string):
+    # Add padding to increase mt length, so we can get rid of BLEU length penalty
+    return PAD_STR.format(input_string)
+
+
+def compute_cross_bleu(mt_list: list, ref_list: list, trg_lang: str = "en"):
+    import comet_reward.sacrebleu_eval as sacrebleu_eval
+
+    eval_out = sacrebleu_eval.func_call(
+        mt_list,
+        ref_list,
+        trg_lang=trg_lang,
+        lowercase=True,
+    )
+    assert len(mt_list) == len(eval_out["scores"])
+    return eval_out["scores"]
+
+
+def get_bleu_penalty(
+    mt_list: list,
+    src_list: list,
+    ref_list: list,
+    src_langs: list,
+    ref_lang: str = "en",
+    scale: float = 0.05,
+):
+    mt_list = [add_padding(replace_numbers_and_operators(mt)) for mt in mt_list]
+
+    # 分组处理不同语言的src_cross_bleu
+    zh_indices = [i for i, lang in enumerate(src_langs) if lang == "zh"]
+    non_zh_indices = [i for i, lang in enumerate(src_langs) if lang != "zh"]
+
+    # 初始化结果列表
+    src_cross_bleu = [0] * len(mt_list)
+
+    print(zh_indices)
+
+    # 处理中文组
+    if zh_indices:
+        zh_mt = [mt_list[i] for i in zh_indices]
+        zh_src = [src_list[i] for i in zh_indices]
+        zh_scores = compute_cross_bleu(zh_mt, zh_src, trg_lang="zh")
+        for idx, score in zip(zh_indices, zh_scores):
+            src_cross_bleu[idx] = score
+
+    # 处理非中文组
+    if non_zh_indices:
+        non_zh_mt = [mt_list[i] for i in non_zh_indices]
+        non_zh_src = [src_list[i] for i in non_zh_indices]
+        non_zh_scores = compute_cross_bleu(non_zh_mt, non_zh_src, trg_lang="en")
+        for idx, score in zip(non_zh_indices, non_zh_scores):
+            src_cross_bleu[idx] = score
+
+    # 计算参考BLEU (始终使用en)
+    ref_cross_bleu = compute_cross_bleu(mt_list, ref_list, trg_lang=ref_lang)
+
+    # 计算最终惩罚
+    bleu_penalty = [(s + r) * scale for s, r in zip(src_cross_bleu, ref_cross_bleu)]
+    return bleu_penalty
