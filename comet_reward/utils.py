@@ -135,6 +135,7 @@ def compute_score(
     use_extract_translation: bool = True,
     use_bleu_penalty: bool = False,
     use_length_penalty: bool = False,
+    filter_max_len: int = 1024,
 ):
     """
     batch compute score
@@ -205,12 +206,18 @@ def compute_score(
             ]
 
         if use_length_penalty:
-            penalty_scores = get_length_penalty(
-                non_none_solution_strs, non_none_trg_text
-            )
-            normalized_scores = [
-                s - p for s, p in zip(normalized_scores, penalty_scores)
+            response_lengths = [
+                extra_infos[i]["response_length"] for i in non_none_indices
             ]
+            assert len(response_lengths) == len(normalized_scores)
+
+            normalized_scores = apply_length_penalty_filter(
+                normalized_scores,
+                non_none_solution_strs,
+                non_none_trg_text,
+                response_lengths,
+                max_response_len=filter_max_len,
+            )
 
         for idx, score in zip(non_none_indices, normalized_scores):
             scores[idx] = score
@@ -522,3 +529,24 @@ def get_length_penalty(
         )
     )
     return length_penalty
+
+
+def apply_length_penalty_filter(
+    scores: list,
+    mt_list: list,
+    ref_list: list,
+    response_token_len: list,
+    max_response_len: int,
+    filtered_score: float = -2,
+):
+
+    penalty_scores = get_length_penalty(mt_list, ref_list)
+    scores = [s - p for s, p in zip(scores, penalty_scores)]
+
+    filter_count = 0
+    for i in range(len(response_token_len)):  # overwrite scores
+        if response_token_len[i] >= max_response_len:
+            scores[i] = filtered_score
+            filter_count += 1
+    print("[Info] length filtered sample: {}".format(filter_count))
+    return scores
