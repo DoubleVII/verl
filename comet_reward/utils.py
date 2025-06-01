@@ -136,6 +136,7 @@ def compute_score(
     use_bleu_penalty: bool = False,
     use_length_penalty: bool = False,
     filter_max_len: int = 1024,
+    response_lengths: list[int] = None,
 ):
     """
     batch compute score
@@ -206,11 +207,8 @@ def compute_score(
             ]
 
         if use_length_penalty:
-            response_lengths = [
-                extra_infos[i]["response_length"] for i in non_none_indices
-            ]
-            assert len(response_lengths) == len(normalized_scores)
-
+            assert response_lengths is not None
+            assert len(response_lengths) == len(non_none_solution_strs)
             normalized_scores = apply_length_penalty_filter(
                 normalized_scores,
                 non_none_solution_strs,
@@ -548,5 +546,13 @@ def apply_length_penalty_filter(
         if response_token_len[i] >= max_response_len:
             scores[i] = filtered_score
             filter_count += 1
-    print("[Info] length filtered sample: {}".format(filter_count))
+    print(
+        "[Info] length filtered sample: {} / {} - min: {}  max: {} mean: {}".format(
+            filter_count,
+            len(scores),
+            min(response_token_len),
+            max(response_token_len),
+            sum(response_token_len) / len(response_token_len),
+        )
+    )
     return scores

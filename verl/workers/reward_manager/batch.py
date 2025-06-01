@@ -56,6 +56,7 @@ class BatchRewardManager:
             solution_strs=responses_str,
             ground_truths=ground_truths,
             extra_infos=extras,
+            response_lengths=valid_response_lengths.tolist(),
             **self.reward_kwargs,
         )
 
@@ -76,11 +77,6 @@ class BatchRewardManager:
         attention_mask = data.batch["attention_mask"]
         valid_response_lengths = attention_mask[:, prompt_len:].sum(dim=-1)
         data_sources = data.non_tensor_batch[self.reward_fn_key]
-
-        if "extra_info" not in data.non_tensor_batch:
-            data.non_tensor_batch["extra_info"] = [{}] * len(data)
-        for i in range(len(data)):
-            data.non_tensor_batch["extra_info"][i]["response_length"] = valid_response_lengths[i].item()
 
         scores = self.verify(data)
         rewards = []
