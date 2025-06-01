@@ -134,6 +134,7 @@ def compute_score(
     server_url: str = None,
     use_extract_translation: bool = True,
     use_bleu_penalty: bool = False,
+    use_length_penalty: bool = False,
 ):
     """
     batch compute score
@@ -198,6 +199,14 @@ def compute_score(
                 non_none_src_text,
                 non_none_trg_text,
                 non_none_src_lang,
+            )
+            normalized_scores = [
+                s - p for s, p in zip(normalized_scores, penalty_scores)
+            ]
+
+        if use_length_penalty:
+            penalty_scores = get_length_penalty(
+                non_none_solution_strs, non_none_trg_text
             )
             normalized_scores = [
                 s - p for s, p in zip(normalized_scores, penalty_scores)
@@ -442,7 +451,7 @@ def get_bleu_penalty(
     ref_list: list,
     src_langs: list,
     ref_lang: str = "en",
-    scale: float = 0.05,
+    scale: float = 0.2,
 ):
     mt_list = [add_padding(replace_numbers_and_operators(mt)) for mt in mt_list]
 
@@ -477,3 +486,25 @@ def get_bleu_penalty(
 
     print("[Info] bleu penalty avg: {}".format(sum(bleu_penalty) / len(bleu_penalty)))
     return bleu_penalty
+
+
+def length_penalty(length: int, min_length: int, max_length: int):
+    """
+    length penalty from 0 to 1 (0: min_length, 1: max_length)
+    """
+    penalty = (length - min_length) / (max_length - min_length)
+    return score_normalize(penalty, 0, 1)
+
+
+def get_length_penalty(
+    mt_list: list,
+    ref_list: list,
+    min_length_factor: float = 3,
+    max_length_factor: float = 5,
+):
+    return [
+        length_penalty(
+            len(mt), len(ref) * min_length_factor, len(ref) * max_length_factor
+        )
+        for mt, ref in zip(mt_list, ref_list)
+    ]
