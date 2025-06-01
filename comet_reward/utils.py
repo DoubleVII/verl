@@ -484,11 +484,16 @@ def get_bleu_penalty(
     # 计算最终惩罚
     bleu_penalty = [(s + r) * scale for s, r in zip(src_cross_bleu, ref_cross_bleu)]
 
-    print("[Info] bleu penalty avg: {}".format(sum(bleu_penalty) / len(bleu_penalty)))
+    print(
+        "[Info] bleu penalty avg - {:.3f}  min - {:.3f}  max - {:.3f}".format(
+            sum(bleu_penalty) / len(bleu_penalty), min(bleu_penalty), max(bleu_penalty)
+        )
+    )
+
     return bleu_penalty
 
 
-def length_penalty(length: int, min_length: int, max_length: int):
+def compute_length_penalty(length: int, min_length: int, max_length: int):
     """
     length penalty from 0 to 1 (0: min_length, 1: max_length)
     """
@@ -502,9 +507,18 @@ def get_length_penalty(
     min_length_factor: float = 2,
     max_length_factor: float = 4,
 ):
-    return [
-        length_penalty(
+    length_penalty = [
+        compute_length_penalty(
             len(mt), len(ref) * min_length_factor, len(ref) * max_length_factor
         )
         for mt, ref in zip(mt_list, ref_list)
     ]
+
+    print(
+        "[Info] length penalty avg - {:.3f}  min - {:.3f}  max - {:.3f}".format(
+            sum(length_penalty) / len(length_penalty),
+            min(length_penalty),
+            max(length_penalty),
+        )
+    )
+    return length_penalty
