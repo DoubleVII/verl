@@ -46,6 +46,11 @@ class BatchRewardManager:
         data_sources = data.non_tensor_batch[self.reward_fn_key]
         extras = data.non_tensor_batch.get("extra_info", [None] * len(data))
 
+
+        if "filter_max_len" in self.reward_kwargs and self.reward_kwargs["filter_max_len"] == "auto":
+            self.reward_kwargs["filter_max_len"] = data.batch["responses"].shape[-1]
+                
+
         scores = self.compute_score(
             data_sources=data_sources,
             solution_strs=responses_str,
