@@ -1052,6 +1052,7 @@ class RayPPOTrainer:
                             prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
 
                         kept_prompt_uids = [uid for uid, std in prompt_uid2metric_std.items() if std > 0 or len(prompt_uid2metric_vals[uid]) == 1]
+                        print("[Info] remove {} / {} group".format(self.config.data.train_batch_size-len(kept_prompt_uids), self.config.data.train_batch_size))
 
                         kept_traj_idxs = []
                         for idx, traj_from_prompt_uid in enumerate(batch.non_tensor_batch["uid"]):
