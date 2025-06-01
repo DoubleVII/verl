@@ -499,8 +499,8 @@ def length_penalty(length: int, min_length: int, max_length: int):
 def get_length_penalty(
     mt_list: list,
     ref_list: list,
-    min_length_factor: float = 3,
-    max_length_factor: float = 5,
+    min_length_factor: float = 2,
+    max_length_factor: float = 4,
 ):
     return [
         length_penalty(
