@@ -1037,7 +1037,7 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
                             batch.batch["token_level_scores"] = reward_tensor # assign here for filter_groups
  
-                    if hasattr(self.algorithm, "filter_groups") and self.config.algorithm.filter_groups.enable:
+                    if hasattr(self.config.algorithm, "filter_groups") and self.config.algorithm.filter_groups.enable:
                         assert not self.config.reward_model.launch_reward_fn_async
                         metric_name = self.config.algorithm.filter_groups.metric
                         batch.non_tensor_batch["seq_reward"] = batch.batch["token_level_scores"].sum(dim=-1).numpy()
