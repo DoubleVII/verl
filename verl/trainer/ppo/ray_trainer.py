@@ -1061,12 +1061,13 @@ class RayPPOTrainer:
                         remove_num = self.config.data.train_batch_size - len(kept_prompt_uids)
                         print("[Info] remove {} / {} group".format(remove_num, self.config.data.train_batch_size))
 
-                        # random repeat the prompt uids to keep the batch size
-                        if remove_num > len(kept_prompt_uids):
-                            repeat_uids = random.choices(kept_prompt_uids, k=remove_num)
-                        else:
-                            repeat_uids = random.sample(remove_num, k=remove_num)
-                        kept_prompt_uids.extend(repeat_uids)
+                        if remove_num > 0:
+                            # random repeat the prompt uids to keep the batch size
+                            if remove_num > len(kept_prompt_uids):
+                                repeat_uids = random.choices(kept_prompt_uids, k=remove_num)
+                            else:
+                                repeat_uids = random.sample(remove_num, k=remove_num)
+                            kept_prompt_uids.extend(repeat_uids)
                         kept_traj_idxs = []
                         for idx, traj_from_prompt_uid in enumerate(batch.non_tensor_batch["uid"]):
                             if traj_from_prompt_uid in kept_prompt_uids:
