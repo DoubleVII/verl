@@ -1067,12 +1067,14 @@ class RayPPOTrainer:
                                 repeat_uids = random.choices(kept_prompt_uids, k=remove_num)
                             else:
                                 repeat_uids = random.sample(kept_prompt_uids, k=remove_num)
+                        else:
+                            repeat_uids = None
                         
                         kept_traj_idxs = []
                         for idx, traj_from_prompt_uid in enumerate(batch.non_tensor_batch["uid"]):
                             if traj_from_prompt_uid in kept_prompt_uids:
                                 kept_traj_idxs.append(idx)
-                            if traj_from_prompt_uid in repeat_uids:
+                            if repeat_uids and traj_from_prompt_uid in repeat_uids:
                                 kept_traj_idxs.append(idx)
 
                         
