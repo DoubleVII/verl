@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
 from typing import Dict, Optional, Type
+import random
 
 import numpy as np
 import ray
@@ -60,6 +61,8 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
+
+random.seed(114514)
 
 WorkerType = Type[Worker]
 
@@ -1055,8 +1058,15 @@ class RayPPOTrainer:
                             prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
 
                         kept_prompt_uids = [uid for uid, std in prompt_uid2metric_std.items() if std > 0 or len(prompt_uid2metric_vals[uid]) == 1]
-                        print("[Info] remove {} / {} group".format(self.config.data.train_batch_size-len(kept_prompt_uids), self.config.data.train_batch_size))
+                        remove_num = self.config.data.train_batch_size - len(kept_prompt_uids)
+                        print("[Info] remove {} / {} group".format(remove_num, self.config.data.train_batch_size))
 
+                        # random repeat the prompt uids to keep the batch size
+                        if remove_num > len(kept_prompt_uids):
+                            repeat_uids = random.choices(kept_prompt_uids, k=remove_num)
+                        else:
+                            repeat_uids = random.sample(remove_num, k=remove_num)
+                        kept_prompt_uids.extend(repeat_uids)
                         kept_traj_idxs = []
                         for idx, traj_from_prompt_uid in enumerate(batch.non_tensor_batch["uid"]):
                             if traj_from_prompt_uid in kept_prompt_uids:
