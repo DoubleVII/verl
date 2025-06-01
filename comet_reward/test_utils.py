@@ -110,4 +110,29 @@ def test_get_bleu_penalty():
     ]
     print(utils.get_bleu_penalty(mt_texts, src_texts, ref_texts, src_langs))
 
-test_get_bleu_penalty()
+
+
+def test_get_length_penalty():
+    mt_texts = [
+        'Девочка была очень похожа на свою мать, с голубыми глазами и белыми волосами, украшенными синими лентами. Ледяной Король думал, что рождение дочери сделает его слабым. В конце концов, до сих пор у него были только сыновья.',
+        3*'Девочка была очень похожа на свою мать, с голубыми глазами и белыми волосами, украшенными синими лентами. 冰之王 Король думал, что рождение дочери сделает его слабым. В конце концов, до сих пор у него были только сыновья.',
+        4*'The girl looked very much like her mother, with blue eyes and white hair adorned with blue ribbons. The Ice King thought that having a daughter would make him weak. After all, he had only had sons so far.',
+        5*'The girl looked very much like her mother, with blue eyes and white hair adorned with blue ribbons. The Ice King thought that having a daughter would make him weak. After all, he had only had sons so far.',
+        ]
+    ref_texts = [
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        ]
+    src_langs = [
+        'zh',
+        'zh',
+        'zh',
+    ]
+    print(utils.get_length_penalty(mt_texts, ref_texts))
+
+
+
+# test_get_bleu_penalty()
+test_get_length_penalty()
