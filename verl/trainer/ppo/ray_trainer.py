@@ -1040,7 +1040,10 @@ class RayPPOTrainer:
                     if hasattr(self.config.algorithm, "filter_groups") and self.config.algorithm.filter_groups.enable:
                         assert not self.config.reward_model.launch_reward_fn_async
                         metric_name = self.config.algorithm.filter_groups.metric
-                        batch.non_tensor_batch["seq_reward"] = batch.batch["token_level_scores"].sum(dim=-1).numpy()
+                        if metric_name == "seq_reward":
+                            batch.non_tensor_batch["seq_reward"] = batch.batch["token_level_scores"].sum(dim=-1).numpy()
+                        elif metric_name == "acc":
+                           batch.non_tensor_batch["acc"] = batch.batch["acc"].numpy()
 
                         # Collect the sequence reward for each trajectory
                         prompt_uid2metric_vals = defaultdict(list)
