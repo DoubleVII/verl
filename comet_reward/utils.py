@@ -128,6 +128,8 @@ def compute_score(
     filter_max_len: int = 1024,
     response_lengths: list[int] = None,
     en_proxy_reward: bool = False,
+    normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
+    normalize_scale: float = 1.0,
 ):
     """
     batch compute score
@@ -191,8 +193,21 @@ def compute_score(
                 batch_size=batch_size,
             )
 
-        # 归一化分数并更新到对应位置
-        normalized_scores = [score_normalize(s, 0, 1) for s in non_none_scores]
+        if normalize_type == "zero2one":
+            normalized_scores = [
+                score_normalize(s, 0, 1) for s in non_none_scores
+            ]
+        elif normalize_type == "scale":
+            normalized_scores = [
+                s * normalize_scale
+                for s in non_none_scores
+            ]
+        elif normalize_type == "none":
+            normalized_scores = non_none_scores
+        else:
+            raise ValueError(
+                f"Invalid normalize_type: {normalize_type}. Choose from 'zero2one', 'scale', or 'none'."
+            )
         if use_bleu_penalty:
             penalty_scores = get_bleu_penalty(
                 non_none_solution_strs,
