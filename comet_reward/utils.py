@@ -3,8 +3,6 @@ import requests
 import time
 import re
 
-SERVER_URL = "http://[2605:340:cd51:601:953b:de9f:af10:b2bb]:9658/predict"
-
 
 def score_normalize(score: float, min_score: float, max_score: float) -> float:
     """
@@ -21,19 +19,14 @@ import requests
 def get_rewards_from_server(
     src_langs: List[str],
     trg_langs: List[str],
-    ref_langs: List[str],
     src_texts: List[str],
-    ref_texts: List[str],
     response_texts: List[str],
-    rm_type: Literal["direct", "pivot", "msr"] = "direct",
-    server_url: str = None,
+    server_url: str,
     batch_size: int = 128,
 ) -> List[float]:
     r"""
     Gets reward scores from the API server by splitting requests into batches.
     """
-    if server_url is None:
-        server_url = SERVER_URL
 
     total_items = len(src_texts)
     all_rewards = []
@@ -45,9 +38,6 @@ def get_rewards_from_server(
             "mt_list": [response_texts[i] for i in batch_indices],
             "src_langs": [src_langs[i] for i in batch_indices],
             "trg_langs": [trg_langs[i] for i in batch_indices],
-            "ref_list": [ref_texts[i] for i in batch_indices],
-            "ref_langs": [ref_langs[i] for i in batch_indices],
-            "rm_type": rm_type,
         }
 
         print(f"[Request] remote reward request batch size: {len(batch_indices)}")
@@ -137,6 +127,7 @@ def compute_score(
     use_length_penalty: bool = False,
     filter_max_len: int = 1024,
     response_lengths: list[int] = None,
+    en_proxy_reward: bool = False,
 ):
     """
     batch compute score
@@ -181,17 +172,24 @@ def compute_score(
 
     # 仅对非None条目获取分数
     if non_none_solution_strs:
-        non_none_scores = get_rewards_from_server(
-            src_langs=non_none_src_lang,
-            trg_langs=non_none_trg_lang,
-            ref_langs=non_none_trg_lang,
-            src_texts=non_none_src_text,
-            ref_texts=non_none_trg_text,
-            response_texts=non_none_solution_strs,
-            rm_type="direct",
-            server_url=server_url,
-            batch_size=batch_size,
-        )
+        if not en_proxy_reward:
+            non_none_scores = get_rewards_from_server(
+                src_langs=non_none_src_lang,
+                trg_langs=non_none_trg_lang,
+                src_texts=non_none_src_text,
+                response_texts=non_none_solution_strs,
+                server_url=server_url,
+                batch_size=batch_size,
+            )
+        else:
+            non_none_scores = get_rewards_from_server(
+                src_langs=["en"] * len(non_none_trg_text),
+                trg_langs=non_none_trg_lang,
+                src_texts=non_none_trg_text,
+                response_texts=non_none_solution_strs,
+                server_url=server_url,
+                batch_size=batch_size,
+            )
 
         # 归一化分数并更新到对应位置
         normalized_scores = [score_normalize(s, 0, 1) for s in non_none_scores]
