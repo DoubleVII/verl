@@ -28,7 +28,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty, compute_policy_sft_loss
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -370,6 +370,7 @@ class DataParallelPPOActor(BasePPOActor):
                     clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
+                    sft_coeff = self.config.get("sft_coeff", 0)
 
                     # all return: (bsz, response_length)
                     calculate_entropy = False
@@ -396,6 +397,18 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = pg_loss - entropy_loss * entropy_coeff
                     else:
                         policy_loss = pg_loss
+
+                    if sft_coeff != 0:
+                        sft_loss = compute_policy_sft_loss(
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                        )
+                        policy_loss = policy_loss + sft_loss * sft_coeff
+                        metrics["actor/sft_loss"] = sft_loss.detach().item()
+
+
 
                     if self.config.use_kl_loss:
                         ref_log_prob = data["ref_log_prob"]

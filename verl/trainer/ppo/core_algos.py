@@ -468,6 +468,33 @@ def compute_policy_loss(
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
+
+def compute_policy_sft_loss(
+    log_prob,
+    advantages,
+    response_mask,
+    loss_agg_mode: str = "token-mean",
+):
+    """
+    Args:
+        log_prob: `(torch.Tensor)`
+            shape: (bs, response_length)
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        response_mask: `(torch.Tensor)`
+            shape: (bs, response_length)
+        loss_agg_mode: (str) see `agg_loss`
+
+    Returns:
+        sft_loss: `a scalar torch.Tensor`
+    """
+
+    positive_advantages = torch.clamp(advantages, 0, None)
+    sft_loss = -agg_loss(loss_mat=positive_advantages * log_prob, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    return sft_loss
+
+
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):
     """Compute categorical entropy loss (For backward compatibility)
 
