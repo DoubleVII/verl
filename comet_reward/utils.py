@@ -130,6 +130,7 @@ def compute_score(
     en_proxy_reward: bool = False,
     normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
     normalize_scale: float = 1.0,
+    score_lower_bound: float = 0.0
 ):
     """
     batch compute score
@@ -162,7 +163,7 @@ def compute_score(
     trg_lang = [l.split("-")[1] for l in lg]
 
     # 初始化全0分数列表
-    scores = [0] * len(solution_strs)
+    scores = [score_lower_bound] * len(solution_strs)
 
     # 筛选非None的索引和对应数据
     non_none_indices = [i for i, s in enumerate(solution_strs) if s is not None]
@@ -228,6 +229,7 @@ def compute_score(
                 non_none_trg_text,
                 response_lengths,
                 max_response_len=filter_max_len,
+                filtered_score=score_lower_bound,
             )
 
         for idx, score in zip(non_none_indices, normalized_scores):
@@ -548,7 +550,7 @@ def apply_length_penalty_filter(
     ref_list: list,
     response_token_len: list,
     max_response_len: int,
-    filtered_score: float = -2,
+    filtered_score: float = 0.0,
 ):
 
     penalty_scores = get_length_penalty(mt_list, ref_list)
