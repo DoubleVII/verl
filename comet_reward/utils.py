@@ -88,6 +88,14 @@ def format_checker(solution_strs: str, forbidden_tags: list[str]) -> bool:
         return False
     return True
 
+def presence_checker(solution_strs: str, presence_tags: list[str], force_once: bool = False) -> bool:
+    for tag in presence_tags:
+        presence_count = solution_strs.count(tag)
+        if presence_count == 0 and force_once:
+            return False
+        if presence_count > 1 and not force_once:
+            return False
+    return True
 
 def extract_translation(solution_strs: str):
     """Extracts the final answer from the model's response string.
@@ -98,6 +106,9 @@ def extract_translation(solution_strs: str):
     Returns:
         extracted_answer
     """
+    presence_tags = ["<think>", "<translate>", "</think>", "</translate>"]
+    if not presence_checker(solution_strs, presence_tags, force_once=True):
+        return None
     # Extract final answer using XML-style tags
     answer_pattern = r"<translate>(.*?)</translate>"
     matches = list(re.finditer(answer_pattern, solution_strs, re.DOTALL))
