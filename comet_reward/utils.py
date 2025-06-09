@@ -91,9 +91,9 @@ def format_checker(solution_strs: str, forbidden_tags: list[str]) -> bool:
 def presence_checker(solution_strs: str, presence_tags: list[str], force_once: bool = False) -> bool:
     for tag in presence_tags:
         presence_count = solution_strs.count(tag)
-        if presence_count == 0 and force_once:
+        if presence_count == 0:
             return False
-        if presence_count > 1 and not force_once:
+        if presence_count > 1 and force_once:
             return False
     return True
 
