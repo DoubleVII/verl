@@ -1,37 +1,37 @@
 import re
 
-def format_checker(solution_strs: str, forbidden_tags: list[str]) -> bool:
+def format_checker(solution_str: str, forbidden_tags: list[str]) -> bool:
     for tag in forbidden_tags:
-        if tag in solution_strs:
+        if tag in solution_str:
             return False
-    if solution_strs == "":
+    if solution_str == "":
         return False
     return True
 
-def presence_checker(solution_strs: str, presence_tags: list[str], force_once: bool = False) -> bool:
+def presence_checker(solution_str: str, presence_tags: list[str], force_once: bool = False) -> bool:
     for tag in presence_tags:
-        presence_count = solution_strs.count(tag)
+        presence_count = solution_str.count(tag)
         if presence_count == 0:
             return False
         if presence_count > 1 and force_once:
             return False
     return True
 
-def extract_solution(solution_strs: str):
+def extract_solution(solution_str: str):
     """Extracts the final answer from the model's response string.
 
     Args:
-        solution_strs: Raw response string from the language model
+        solution_str: Raw response string from the language model
 
     Returns:
         extracted_answer
     """
     presence_tags = ["<think>", "<answer>", "</think>", "</answer>"]
-    if not presence_checker(solution_strs, presence_tags, force_once=True):
+    if not presence_checker(solution_str, presence_tags, force_once=True):
         return None
     # Extract final answer using XML-style tags
     answer_pattern = r"<answer>(.*?)</answer>"
-    matches = list(re.finditer(answer_pattern, solution_strs, re.DOTALL))
+    matches = list(re.finditer(answer_pattern, solution_str, re.DOTALL))
 
     if not matches:
         # print("[Error] No valid answer tags found")
