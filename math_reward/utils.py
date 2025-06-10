@@ -46,7 +46,7 @@ def extract_solution(solution_strs: str):
     return None
 
 
-def compute_score(data_source, solution_str, ground_truth, format_score=0.0, score=1.0, use_extract_solution: bool = True,):
+def compute_score(data_source, solution_str, ground_truth, extra_info=None, format_score=0.0, score=1.0, use_extract_solution: bool = True,):
     if use_extract_solution:
         answer = extract_solution(solution_str=solution_str)
     else:
