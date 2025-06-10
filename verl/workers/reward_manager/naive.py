@@ -23,11 +23,12 @@ from verl.utils.reward_score import default_compute_score
 class NaiveRewardManager:
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
+    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", **reward_kwargs) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key
+        self.reward_kwargs = reward_kwargs
 
     def __call__(self, data: DataProto, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
@@ -73,6 +74,7 @@ class NaiveRewardManager:
                 solution_str=response_str,
                 ground_truth=ground_truth,
                 extra_info=extra_info,
+                **self.reward_kwargs,
             )
 
             if isinstance(score, dict):
