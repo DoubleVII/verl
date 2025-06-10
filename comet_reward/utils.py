@@ -80,38 +80,38 @@ def get_rewards_from_server(
     return all_rewards
 
 
-def format_checker(solution_strs: str, forbidden_tags: list[str]) -> bool:
+def format_checker(solution_str: str, forbidden_tags: list[str]) -> bool:
     for tag in forbidden_tags:
-        if tag in solution_strs:
+        if tag in solution_str:
             return False
-    if solution_strs == "":
+    if solution_str == "":
         return False
     return True
 
-def presence_checker(solution_strs: str, presence_tags: list[str], force_once: bool = False) -> bool:
+def presence_checker(solution_str: str, presence_tags: list[str], force_once: bool = False) -> bool:
     for tag in presence_tags:
-        presence_count = solution_strs.count(tag)
+        presence_count = solution_str.count(tag)
         if presence_count == 0:
             return False
         if presence_count > 1 and force_once:
             return False
     return True
 
-def extract_translation(solution_strs: str):
+def extract_thinking_translation(solution_str: str):
     """Extracts the final answer from the model's response string.
 
     Args:
-        solution_strs: Raw response string from the language model
+        solution_str: Raw response string from the language model
 
     Returns:
         extracted_answer
     """
     presence_tags = ["<think>", "<translate>", "</think>", "</translate>"]
-    if not presence_checker(solution_strs, presence_tags, force_once=True):
+    if not presence_checker(solution_str, presence_tags, force_once=True):
         return None
     # Extract final answer using XML-style tags
     answer_pattern = r"<translate>(.*?)</translate>"
-    matches = list(re.finditer(answer_pattern, solution_strs, re.DOTALL))
+    matches = list(re.finditer(answer_pattern, solution_str, re.DOTALL))
 
     if not matches:
         # print("[Error] No valid answer tags found")
@@ -126,6 +126,40 @@ def extract_translation(solution_strs: str):
     return None
 
 
+def extract_no_thinking_translation(solution_str: str):
+    """Extracts the final answer from the model's response string.
+
+    Args:
+        solution_str: Raw response string from the language model
+
+    Returns:
+        extracted_answer
+    """
+    solution_str = solution_str.strip()
+    presence_tags = ["<translate>", "</translate>"]
+    if not presence_checker(solution_str, presence_tags, force_once=True):
+        return None
+    if not solution_str.startswith(presence_tags[0]):
+        return None
+    if not solution_str.endswith(presence_tags[1]):
+        return None
+
+    # Extract final answer using XML-style tags
+    answer_pattern = r"<translate>(.*?)</translate>"
+    matches = list(re.finditer(answer_pattern, solution_str, re.DOTALL))
+
+    if not matches:
+        # print("[Error] No valid answer tags found")
+        return None
+
+    final_answer = matches[-1].group(1).strip()
+
+    if format_checker(
+        final_answer, ["<think>", "<translate>", "</think>", "</translate>"]
+    ):
+        return final_answer
+    return None
+
 def compute_score(
     data_sources,
     solution_strs,
@@ -133,7 +167,7 @@ def compute_score(
     extra_infos=None,
     batch_size=128,
     server_url: str = None,
-    use_extract_translation: bool = True,
+    use_extract_translation: str = "none",
     use_bleu_penalty: bool = False,
     use_length_penalty: bool = False,
     filter_max_len: int = 1024,
@@ -162,9 +196,14 @@ def compute_score(
         == len(extra_infos)
     )
 
-    # 提取翻译结果，可能包含None
-    if use_extract_translation:
-        solution_strs = [extract_translation(s) for s in solution_strs]
+    if use_extract_translation == "thinking":
+        solution_strs = [extract_thinking_translation(s) for s in solution_strs]
+    elif use_extract_translation == "no_thinking":
+        solution_strs = [extract_no_thinking_translation(s) for s in solution_strs]
+    elif use_extract_translation == "none":
+        pass
+    else:
+        raise ValueError(f"Unknown use_extract_translation: {use_extract_translation}")
 
     # 提取辅助信息
     src_text = [extra_infos_item["src_text"] for extra_infos_item in extra_infos]
