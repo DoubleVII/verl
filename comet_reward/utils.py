@@ -223,6 +223,12 @@ def compute_score(
     non_none_trg_text = [tgt_text[i] for i in non_none_indices]
     non_none_solution_strs = [solution_strs[i] for i in non_none_indices]
 
+    if use_length_penalty:
+        assert response_lengths is not None
+        assert len(response_lengths) == len(solution_strs)
+        non_none_response_lengths = [response_lengths[i] for i in non_none_indices]
+
+
     # 仅对非None条目获取分数
     if non_none_solution_strs:
         if not en_proxy_reward:
@@ -271,13 +277,11 @@ def compute_score(
             ]
 
         if use_length_penalty:
-            assert response_lengths is not None
-            assert len(response_lengths) == len(non_none_solution_strs)
             normalized_scores = apply_length_penalty_filter(
                 normalized_scores,
                 non_none_solution_strs,
                 non_none_trg_text,
-                response_lengths,
+                non_none_response_lengths,
                 max_response_len=filter_max_len,
                 filtered_score=score_lower_bound,
             )
