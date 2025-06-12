@@ -29,14 +29,14 @@ def get_rewards_from_server(
     Gets reward scores from the API server by splitting requests into batches.
     """
 
-    total_items = len(src_texts)
+    total_items = len(response_texts)
     all_rewards = []
 
     # 处理单个批次的请求（包含重试逻辑）
     def _request_single_batch(batch_indices):
         batch_payload = {
-            "ref_list": ref_texts[batch_indices] if ref_texts else None,
-            "src_list": src_texts[batch_indices] if src_texts else None,
+            "ref_list": [ref_texts[i] for i in batch_indices] if ref_texts else None,
+            "src_list": [src_texts[i] for i in batch_indices] if src_texts else None,
             "mt_list": [response_texts[i] for i in batch_indices],
             "src_langs": [src_langs[i] for i in batch_indices],
             "trg_langs": [trg_langs[i] for i in batch_indices],
