@@ -17,11 +17,12 @@ import requests
 
 
 def get_rewards_from_server(
+    server_url: str,
+    response_texts: List[str],
     src_langs: List[str],
     trg_langs: List[str],
-    src_texts: List[str],
-    response_texts: List[str],
-    server_url: str,
+    src_texts: List[str] = None,
+    ref_texts: List[str] = None,
     batch_size: int = 128,
 ) -> List[float]:
     r"""
@@ -34,7 +35,8 @@ def get_rewards_from_server(
     # 处理单个批次的请求（包含重试逻辑）
     def _request_single_batch(batch_indices):
         batch_payload = {
-            "src_list": [src_texts[i] for i in batch_indices],
+            "ref_list": ref_texts[batch_indices] if ref_texts else None,
+            "src_list": src_texts[batch_indices] if src_texts else None,
             "mt_list": [response_texts[i] for i in batch_indices],
             "src_langs": [src_langs[i] for i in batch_indices],
             "trg_langs": [trg_langs[i] for i in batch_indices],
@@ -186,7 +188,9 @@ def compute_score(
     en_proxy_reward: bool = False,
     normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
     normalize_scale: float = 1.0,
-    score_lower_bound: float = 0.0
+    score_lower_bound: float = 0.0,
+    use_src_text: bool = True,
+    use_ref_text: bool = True,
 ):
     """
     batch compute score
@@ -225,65 +229,73 @@ def compute_score(
     src_lang = [l.split("-")[0] for l in lg]
     trg_lang = [l.split("-")[1] for l in lg]
 
+
     # 初始化全0分数列表
     scores = [score_lower_bound] * len(solution_strs)
 
     # 筛选非None的索引和对应数据
-    non_none_indices = [i for i, s in enumerate(solution_strs) if s is not None]
-    non_none_src_lang = [src_lang[i] for i in non_none_indices]
-    non_none_trg_lang = [trg_lang[i] for i in non_none_indices]
-    non_none_src_text = [src_text[i] for i in non_none_indices]
-    non_none_trg_text = [tgt_text[i] for i in non_none_indices]
-    non_none_solution_strs = [solution_strs[i] for i in non_none_indices]
+    valid_indices = [i for i, s in enumerate(solution_strs) if s is not None]
+    valid_src_lang = [src_lang[i] for i in valid_indices]
+    valid_trg_lang = [trg_lang[i] for i in valid_indices]
+    valid_src_text = [src_text[i] for i in valid_indices]
+    valid_trg_text = [tgt_text[i] for i in valid_indices]
+    valid_solution_strs = [solution_strs[i] for i in valid_indices]
+
+    if en_proxy_reward:
+        assert "en_text" in extra_infos[0]
+        en_text = [extra_infos_item["en_text"] for extra_infos_item in extra_infos]
+        valid_en_text = [en_text[i] for i in valid_indices]
 
     if use_length_penalty:
         assert response_lengths is not None
         assert len(response_lengths) == len(solution_strs)
-        non_none_response_lengths = [response_lengths[i] for i in non_none_indices]
+        valid_response_lengths = [response_lengths[i] for i in valid_indices]
 
 
     # 仅对非None条目获取分数
-    if non_none_solution_strs:
+    if valid_solution_strs:
         if not en_proxy_reward:
-            non_none_scores = get_rewards_from_server(
-                src_langs=non_none_src_lang,
-                trg_langs=non_none_trg_lang,
-                src_texts=non_none_src_text,
-                response_texts=non_none_solution_strs,
+            valid_scores = get_rewards_from_server(
+                src_langs=valid_src_lang,
+                trg_langs=valid_trg_lang,
+                response_texts=valid_solution_strs,
                 server_url=server_url,
                 batch_size=batch_size,
+                src_texts=valid_src_text if use_src_text else None,
+                ref_texts=valid_trg_text if use_ref_text else None,
             )
         else:
-            non_none_scores = get_rewards_from_server(
-                src_langs=["en"] * len(non_none_trg_text),
-                trg_langs=non_none_trg_lang,
-                src_texts=non_none_trg_text,
-                response_texts=non_none_solution_strs,
+            valid_scores = get_rewards_from_server(
+                src_langs=["en"] * len(valid_en_text),
+                trg_langs=valid_trg_lang,
+                response_texts=valid_solution_strs,
                 server_url=server_url,
                 batch_size=batch_size,
+                src_texts=valid_en_text if use_src_text else None,
+                ref_texts=valid_trg_text if use_ref_text else None,
             )
 
         if normalize_type == "zero2one":
             normalized_scores = [
-                score_normalize(s, 0, 1) for s in non_none_scores
+                score_normalize(s, 0, 1) for s in valid_scores
             ]
         elif normalize_type == "scale":
             normalized_scores = [
                 s * normalize_scale
-                for s in non_none_scores
+                for s in valid_scores
             ]
         elif normalize_type == "none":
-            normalized_scores = non_none_scores
+            normalized_scores = valid_scores
         else:
             raise ValueError(
                 f"Invalid normalize_type: {normalize_type}. Choose from 'zero2one', 'scale', or 'none'."
             )
         if use_bleu_penalty:
             penalty_scores = get_bleu_penalty(
-                non_none_solution_strs,
-                non_none_src_text,
-                non_none_trg_text,
-                non_none_src_lang,
+                valid_solution_strs,
+                valid_src_text,
+                valid_trg_text,
+                valid_src_lang,
             )
             normalized_scores = [
                 s - p for s, p in zip(normalized_scores, penalty_scores)
@@ -292,14 +304,14 @@ def compute_score(
         if use_length_penalty:
             normalized_scores = apply_length_penalty_filter(
                 normalized_scores,
-                non_none_solution_strs,
-                non_none_trg_text,
-                non_none_response_lengths,
+                valid_solution_strs,
+                valid_trg_text,
+                valid_response_lengths,
                 max_response_len=filter_max_len,
                 filtered_score=score_lower_bound,
             )
 
-        for idx, score in zip(non_none_indices, normalized_scores):
+        for idx, score in zip(valid_indices, normalized_scores):
             scores[idx] = score
 
     return scores
@@ -437,41 +449,41 @@ def compute_score_progressive(
     # 初始化全0分数列表
     scores = [0] * len(solution_strs_tuples)
 
-    non_none_indices = []
+    valid_indices = []
     # 筛选非None的索引和对应数据
     for i, t in enumerate(solution_strs_tuples):
         # t[0]: draft; t[1]: answer
         if t[0] is not None and t[1] is not None:
-            non_none_indices.append(i)
+            valid_indices.append(i)
 
-    non_none_src_lang = [src_lang[i] for i in non_none_indices]
-    non_none_trg_lang = [trg_lang[i] for i in non_none_indices]
-    non_none_src_text = [src_text[i] for i in non_none_indices]
-    non_none_trg_text = [tgt_text[i] for i in non_none_indices]
-    non_none_draft_strs = [solution_strs_tuples[i][0] for i in non_none_indices]
-    non_none_answer_strs = [solution_strs_tuples[i][1] for i in non_none_indices]
+    valid_src_lang = [src_lang[i] for i in valid_indices]
+    valid_trg_lang = [trg_lang[i] for i in valid_indices]
+    valid_src_text = [src_text[i] for i in valid_indices]
+    valid_trg_text = [tgt_text[i] for i in valid_indices]
+    valid_draft_strs = [solution_strs_tuples[i][0] for i in valid_indices]
+    valid_answer_strs = [solution_strs_tuples[i][1] for i in valid_indices]
 
     # 仅对非None条目获取分数
-    if non_none_draft_strs:
-        non_none_draft_scores = get_rewards_from_server(
-            src_langs=non_none_src_lang,
-            trg_langs=non_none_trg_lang,
-            ref_langs=non_none_trg_lang,
-            src_texts=non_none_src_text,
-            ref_texts=non_none_trg_text,
-            response_texts=non_none_draft_strs,
+    if valid_draft_strs:
+        valid_draft_scores = get_rewards_from_server(
+            src_langs=valid_src_lang,
+            trg_langs=valid_trg_lang,
+            ref_langs=valid_trg_lang,
+            src_texts=valid_src_text,
+            ref_texts=valid_trg_text,
+            response_texts=valid_draft_strs,
             rm_type="direct",
             server_url=server_url,
             batch_size=batch_size,
         )
 
-        non_none_answer_scores = get_rewards_from_server(
-            src_langs=non_none_src_lang,
-            trg_langs=non_none_trg_lang,
-            ref_langs=non_none_trg_lang,
-            src_texts=non_none_src_text,
-            ref_texts=non_none_trg_text,
-            response_texts=non_none_answer_strs,
+        valid_answer_scores = get_rewards_from_server(
+            src_langs=valid_src_lang,
+            trg_langs=valid_trg_lang,
+            ref_langs=valid_trg_lang,
+            src_texts=valid_src_text,
+            ref_texts=valid_trg_text,
+            response_texts=valid_answer_strs,
             rm_type="direct",
             server_url=server_url,
             batch_size=batch_size,
@@ -479,24 +491,24 @@ def compute_score_progressive(
 
         print(
             "[Info] draft score avg: ",
-            sum(non_none_draft_scores) / len(non_none_draft_scores),
+            sum(valid_draft_scores) / len(valid_draft_scores),
         )
         print(
             "[Info] answer score avg: ",
-            sum(non_none_answer_scores) / len(non_none_answer_scores),
+            sum(valid_answer_scores) / len(valid_answer_scores),
         )
         print(
             "[Info] delta score avg: ",
-            (sum(non_none_answer_scores) - sum(non_none_draft_scores))
-            / len(non_none_answer_scores),
+            (sum(valid_answer_scores) - sum(valid_draft_scores))
+            / len(valid_answer_scores),
         )
 
         final_score = [
             fusion_fn(d, a)
-            for d, a in zip(non_none_draft_scores, non_none_answer_scores)
+            for d, a in zip(valid_draft_scores, valid_answer_scores)
         ]
 
-        for idx, score in zip(non_none_indices, final_score):
+        for idx, score in zip(valid_indices, final_score):
             scores[idx] = score
 
     return scores
