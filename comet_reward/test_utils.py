@@ -153,6 +153,61 @@ def test_apply_length_penalty_filter():
 
 
 
+
+
+def test_bleurt_api_call():
+    mt_texts = [
+        'The girl looked a lot like her mother, with blue eyes and white hair adorned with blue ribbons. The Ice King thought that having a daughter would make him weak. After all, he had only had sons so far.',
+        'The girl looked a lot like her mother: blue eyes and white hair decorated with blue ribbons. The Ice King thought that having a daughter would make him weak. After all, until now he had only sons.',
+        'The girl looked very much like her mother, with blue eyes and white hair adorned with blue ribbons. The Ice King thought that having a daughter would make him weak. After all, he had only had sons so far.',
+        ]
+    ref_texts = [
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        'The girl looked a lot like her mother, with light blue eyes and white hair accented with blue ribbons. The Ice King thought that having a daughter would make him look weak. After all, until now he had only had sons.',
+        ]
+    
+    sample_num = len(mt_texts)
+    repeat_n = 128
+    scores = utils.get_rewards_from_server(
+        server_url="http://[2605:340:cd51:603:3dab:b926:3a94:eb80]:9713/predict",
+        response_texts=mt_texts * repeat_n,
+        src_langs=['ru']*sample_num * repeat_n,
+        trg_langs=['en']*sample_num * repeat_n,
+        ref_texts=ref_texts * repeat_n,
+        batch_size=1024,
+        )
+    print(scores)
+
+
+    extra_infos = {'src_text': '', 'tgt_text': '', "lang_pair": "ru-en"}
+
+    data_sources = 'none'
+
+    data_sources = [data_sources] * sample_num * repeat_n
+    solution_strs = mt_texts * repeat_n
+    extra_infos = [extra_infos] * sample_num
+
+    for extra_info_item, ref_text in zip(extra_infos, ref_texts):
+        extra_info_item['tgt_text'] = ref_text
+    extra_infos = extra_infos * repeat_n
+
+    ground_truths = [extra_infos_item['tgt_text'] for extra_infos_item in extra_infos]
+
+    scores = utils.compute_score(
+        data_sources=data_sources,
+        solution_strs=solution_strs,
+        ground_truths=ground_truths,
+        extra_infos=extra_infos,
+        use_src_text=False,
+        use_ref_text=True,
+        server_url="http://[2605:340:cd51:603:3dab:b926:3a94:eb80]:9713/predict",
+    )
+
+    print(scores)
+
+
+
 # test_get_bleu_penalty()
 # test_get_length_penalty()
-test_apply_length_penalty_filter()
+# test_apply_length_penalty_filter()
