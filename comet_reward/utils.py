@@ -16,6 +16,22 @@ from typing import List, Literal
 import requests
 
 
+THINKING_TAGS = ["<think>", "</think>"]
+TRANSLATION_TAGS = ["<translation>", "</translation>"]
+OLD_TRANSLATION_TAGS = ["<translate>", "</translate>"]
+
+TRANSLATION_REGEX_STR = r"<translation>(.*?)</translation>"
+OLD_TRANSLATION_REGEX_STR = r"<translate>(.*?)</translate>"
+
+import os
+
+# get env var
+use_old_tag = os.getenv("TRANSLATION_PROMPT_VERSION") == "v1"
+if use_old_tag:
+    TRANSLATION_REGEX_STR = OLD_TRANSLATION_REGEX_STR
+    TRANSLATION_TAGS = OLD_TRANSLATION_TAGS
+
+
 def get_rewards_from_server(
     server_url: str,
     response_texts: List[str],
@@ -108,11 +124,11 @@ def extract_thinking_translation(solution_str: str):
     Returns:
         extracted_answer
     """
-    presence_tags = ["<think>", "<translate>", "</think>", "</translate>"]
+    presence_tags = THINKING_TAGS + TRANSLATION_TAGS
     if not presence_checker(solution_str, presence_tags, force_once=True):
         return None
     # Extract final answer using XML-style tags
-    answer_pattern = r"<translate>(.*?)</translate>"
+    answer_pattern = TRANSLATION_REGEX_STR
     matches = list(re.finditer(answer_pattern, solution_str, re.DOTALL))
 
     if not matches:
@@ -122,7 +138,7 @@ def extract_thinking_translation(solution_str: str):
     final_answer = matches[-1].group(1).strip()
 
     if format_checker(
-        final_answer, ["<think>", "<translate>", "</think>", "</translate>"]
+        final_answer, presence_tags
     ):
         return final_answer
     return None
@@ -149,7 +165,7 @@ def extract_no_thinking_translation(solution_str: str):
         extracted_answer
     """
     solution_str = solution_str.strip()
-    presence_tags = ["<translate>", "</translate>"]
+    presence_tags = TRANSLATION_TAGS
     if not presence_checker(solution_str, presence_tags, force_once=True):
         return None
     if not solution_str.startswith(presence_tags[0]):
@@ -158,7 +174,7 @@ def extract_no_thinking_translation(solution_str: str):
         return None
 
     # Extract final answer using XML-style tags
-    answer_pattern = r"<translate>(.*?)</translate>"
+    answer_pattern = TRANSLATION_REGEX_STR
     matches = list(re.finditer(answer_pattern, solution_str, re.DOTALL))
 
     if not matches:
@@ -168,7 +184,7 @@ def extract_no_thinking_translation(solution_str: str):
     final_answer = matches[-1].group(1).strip()
 
     if format_checker(
-        final_answer, ["<think>", "<translate>", "</think>", "</translate>"]
+        final_answer, presence_tags
     ):
         return final_answer
     return None
@@ -298,15 +314,13 @@ def extract_translation_progressive(solution_strs: str) -> tuple[str, str]:
     """
     forbidden_tags = [
         "<draft>",
-        "<translation>",
         "</draft>",
-        "</translation>",
         "<analysis>",
         "</analysis>",
-    ]
+    ] + TRANSLATION_TAGS
     # Extract final answer using XML-style tags
     draft_pattern = r"<draft>(.*?)</draft>"
-    answer_pattern = r"<translation>(.*?)</translation>"
+    answer_pattern = TRANSLATION_REGEX_STR
     draft_matches = list(re.finditer(draft_pattern, solution_strs, re.DOTALL))
 
     if not draft_matches:
