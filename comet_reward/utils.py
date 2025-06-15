@@ -525,7 +525,7 @@ def compute_score_progressive(
         )
         
         # 融合分数
-        final_scores = [
+        scores = [
             fusion_fn(d, a) 
             for d, a in zip(draft_scores, answer_scores)
         ]
