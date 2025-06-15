@@ -338,8 +338,22 @@ def extract_translation_flexible_progressive(solution_strs: str) -> tuple[str, s
     Returns:
         extracted_answer
     """
+    def search_translation(text:str, prefix_list: list[str]):
+        text = text.strip()
+        for prefix in prefix_list:
+            if text.startswith(prefix):
+                return text[len(prefix):].strip()
+        return None
+
     solution_lines = solution_strs.strip().split("\n")
+    if len(solution_lines) <= 3: # draft, analysis, answer
+        return None, None
+
     draft_text, answer_text = solution_lines[0], solution_lines[-1]    
+    draft_text = search_translation(draft_text, ["Draft translation:", "Draft Translation:"])
+    answer_text = search_translation(answer_text, ["Final translation:", "Final Translation:"])
+    if draft_text is None or answer_text is None:
+        return None, None
     return draft_text, answer_text
 
 
