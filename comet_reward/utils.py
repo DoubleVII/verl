@@ -16,7 +16,8 @@ from typing import List, Literal
 import requests
 
 
-THINKING_TAGS = ["<think>", "</think>"]
+THINKING_TAGS = ["<analysis>", "</analysis>"]
+OLD_THINKING_TAGS = ["<think>", "</think>"]
 TRANSLATION_TAGS = ["<translation>", "</translation>"]
 OLD_TRANSLATION_TAGS = ["<translate>", "</translate>"]
 
@@ -28,6 +29,7 @@ import os
 # get env var
 use_old_tag = os.getenv("TRANSLATION_PROMPT_VERSION") == "v1"
 if use_old_tag:
+    THINKING_TAGS = OLD_THINKING_TAGS
     TRANSLATION_REGEX_STR = OLD_TRANSLATION_REGEX_STR
     TRANSLATION_TAGS = OLD_TRANSLATION_TAGS
 
