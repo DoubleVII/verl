@@ -553,7 +553,7 @@ def compute_score_progressive(
         )
         
         # 更新有效索引的分数
-        for idx, score in zip(valid_indices, final_scores):
+        for idx, score in zip(valid_indices, scores):
             final_scores[idx] = score
 
     return final_scores
