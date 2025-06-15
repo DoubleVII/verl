@@ -463,7 +463,8 @@ def compute_score_progressive(
         assert "en_text" in extra_infos[0]
         en_text = [extra_infos_item["en_text"] for extra_infos_item in extra_infos]
         valid_en_text = [en_text[i] for i in valid_indices]
-    
+    else:
+        valid_en_text = None
 
     # 处理响应长度（分离草稿和最终长度）
     if use_length_penalty:
