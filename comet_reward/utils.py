@@ -771,12 +771,12 @@ def apply_response_length_penalty(
             scores[i] = clip_score
             filtered_count += 1
     print(
-        "[Info] length filtered sample: {} / {} - min: {}  max: {} mean: {:.2f}".format(
+        "[Info] response length penalty avg - {:.3f}  min - {:.3f}  max - {:.3f} - filtered - {} / {}".format(
+            sum(length_penalty) / len(length_penalty),
+            min(length_penalty),
+            max(length_penalty),
             filtered_count,
             len(scores),
-            min(response_token_len),
-            max(response_token_len),
-            sum(response_token_len) / len(response_token_len),
         )
     )
     return scores
