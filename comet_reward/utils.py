@@ -184,6 +184,7 @@ def compute_score(
     use_bleu_penalty: bool = False,
     use_length_penalty: bool = False,
     filter_max_len: int = 1024,
+    penalty_buffer_len: int = 256,
     response_lengths: list[int] = None,
     en_proxy_reward: bool = False,
     normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
@@ -231,7 +232,7 @@ def compute_score(
 
 
     # 初始化全0分数列表
-    scores = [score_lower_bound] * len(solution_strs)
+    final_scores = [score_lower_bound] * len(solution_strs)
 
     # 筛选非None的索引和对应数据
     valid_indices = [i for i, s in enumerate(solution_strs) if s is not None]
@@ -245,6 +246,8 @@ def compute_score(
         assert "en_text" in extra_infos[0]
         en_text = [extra_infos_item["en_text"] for extra_infos_item in extra_infos]
         valid_en_text = [en_text[i] for i in valid_indices]
+    else:
+        valid_en_text = None
 
     if use_length_penalty:
         assert response_lengths is not None
@@ -254,67 +257,34 @@ def compute_score(
 
     # 仅对非None条目获取分数
     if valid_solution_strs:
-        if not en_proxy_reward:
-            valid_scores = get_rewards_from_server(
-                src_langs=valid_src_lang,
-                trg_langs=valid_trg_lang,
-                response_texts=valid_solution_strs,
-                server_url=server_url,
-                batch_size=batch_size,
-                src_texts=valid_src_text if use_src_text else None,
-                ref_texts=valid_trg_text if use_ref_text else None,
-            )
-        else:
-            valid_scores = get_rewards_from_server(
-                src_langs=["en"] * len(valid_en_text),
-                trg_langs=valid_trg_lang,
-                response_texts=valid_solution_strs,
-                server_url=server_url,
-                batch_size=batch_size,
-                src_texts=valid_en_text if use_src_text else None,
-                ref_texts=valid_trg_text if use_ref_text else None,
-            )
+        scores = get_tranlation_scores(
+            valid_solution_strs,
+            valid_src_lang,
+            valid_trg_lang,
+            valid_src_text,
+            valid_trg_text,
+            server_url,
+            batch_size,
+            normalize_type=normalize_type,
+            normalize_scale=normalize_scale,
+            use_src_text=use_src_text,
+            use_ref_text=use_ref_text,
+            texts_en=valid_en_text,
+            use_bleu_penalty=use_bleu_penalty,
+            use_length_penalty=use_length_penalty,
+        )
+        scores = apply_response_length_penalty(
+            scores,
+            valid_response_lengths,
+            max_response_len=filter_max_len,
+            penalty_buffer_len=penalty_buffer_len,
+            clip_score=score_lower_bound,
+        )
 
-        if normalize_type == "zero2one":
-            normalized_scores = [
-                score_normalize(s, 0, 1) for s in valid_scores
-            ]
-        elif normalize_type == "scale":
-            normalized_scores = [
-                s * normalize_scale
-                for s in valid_scores
-            ]
-        elif normalize_type == "none":
-            normalized_scores = valid_scores
-        else:
-            raise ValueError(
-                f"Invalid normalize_type: {normalize_type}. Choose from 'zero2one', 'scale', or 'none'."
-            )
-        if use_bleu_penalty:
-            penalty_scores = get_bleu_penalty(
-                valid_solution_strs,
-                valid_src_text,
-                valid_trg_text,
-                valid_src_lang,
-            )
-            normalized_scores = [
-                s - p for s, p in zip(normalized_scores, penalty_scores)
-            ]
+        for idx, score in zip(valid_indices, scores):
+            final_scores[idx] = score
 
-        if use_length_penalty:
-            normalized_scores = apply_length_penalty_filter(
-                normalized_scores,
-                valid_solution_strs,
-                valid_trg_text,
-                valid_response_lengths,
-                max_response_len=filter_max_len,
-                filtered_score=score_lower_bound,
-            )
-
-        for idx, score in zip(valid_indices, normalized_scores):
-            scores[idx] = score
-
-    return scores
+    return final_scores
 
 
 def extract_translation_progressive(solution_strs: str) -> tuple[str, str]:
@@ -358,6 +328,21 @@ def extract_translation_progressive(solution_strs: str) -> tuple[str, str]:
     return draft_text, answer_text
 
 
+
+def extract_translation_flexible_progressive(solution_strs: str) -> tuple[str, str]:
+    """Extracts the final answer from the model's response string.
+
+    Args:
+        solution_strs: Raw response string from the language model
+
+    Returns:
+        extracted_answer
+    """
+    solution_lines = solution_strs.strip().split("\n")
+    draft_text, answer_text = solution_lines[0], solution_lines[-1]    
+    return draft_text, answer_text
+
+
 def delta_plus_score(draft_score, answer_score, gamma=1.0):
     """
     $\frac{s_a-s_d}{1.1-s_d}+\gamma * s_d$
@@ -395,6 +380,7 @@ def final_score(draft_score, answer_score):
     return answer_score
 
 
+
 def compute_score_progressive(
     data_sources,
     solution_strs,
@@ -403,14 +389,25 @@ def compute_score_progressive(
     batch_size=128,
     fusion_type: str = "delta+",
     server_url: str = None,
-    use_extract_translation: bool = True,
+    use_extract_translation: str = "break_line",
+    use_bleu_penalty: bool = False,
+    use_length_penalty: bool = False,
+    filter_max_len: int = 1024,
+    penalty_buffer_len: int = 256,
+    response_lengths: list[int] = None,
+    en_proxy_reward: bool = False,
+    normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
+    normalize_scale: float = 1.0,
+    score_lower_bound: float = 0.0,
+    use_src_text: bool = True,
+    use_ref_text: bool = True,
 ):
     """
-    batch compute score
+    batch compute score (progressive version aligned with compute_score)
     """
 
     assert fusion_type in ["delta+", "delta++", "sum", "final"]
-    assert use_extract_translation
+    assert use_extract_translation  # 保持仅支持flexible_progressive提取
 
     if fusion_type == "delta+":
         fusion_fn = delta_plus_score
@@ -422,7 +419,6 @@ def compute_score_progressive(
         fusion_fn = final_score
 
     assert extra_infos is not None
-
     assert (
         isinstance(data_sources, Iterable)
         and isinstance(solution_strs, Iterable)
@@ -436,8 +432,8 @@ def compute_score_progressive(
         == len(extra_infos)
     )
 
-    # 提取翻译结果，可能包含None
-    solution_strs_tuples = [extract_translation_progressive(s) for s in solution_strs]
+    # 提取翻译结果（草稿+最终）
+    solution_strs_tuples = [extract_translation_flexible_progressive(s) for s in solution_strs]
 
     # 提取辅助信息
     src_text = [extra_infos_item["src_text"] for extra_infos_item in extra_infos]
@@ -446,13 +442,12 @@ def compute_score_progressive(
     src_lang = [l.split("-")[0] for l in lg]
     trg_lang = [l.split("-")[1] for l in lg]
 
-    # 初始化全0分数列表
-    scores = [0] * len(solution_strs_tuples)
+    # 初始化分数为下界值
+    final_scores = [score_lower_bound] * len(solution_strs_tuples)
 
+    # 筛选有效索引（草稿和最终翻译均非None）
     valid_indices = []
-    # 筛选非None的索引和对应数据
     for i, t in enumerate(solution_strs_tuples):
-        # t[0]: draft; t[1]: answer
         if t[0] is not None and t[1] is not None:
             valid_indices.append(i)
 
@@ -462,55 +457,164 @@ def compute_score_progressive(
     valid_trg_text = [tgt_text[i] for i in valid_indices]
     valid_draft_strs = [solution_strs_tuples[i][0] for i in valid_indices]
     valid_answer_strs = [solution_strs_tuples[i][1] for i in valid_indices]
+    
+    # 提取英文代理文本（若启用）
+    if en_proxy_reward:
+        assert "en_text" in extra_infos[0]
+        en_text = [extra_infos_item["en_text"] for extra_infos_item in extra_infos]
+        valid_en_text = [en_text[i] for i in valid_indices]
+    
 
-    # 仅对非None条目获取分数
+    # 处理响应长度（分离草稿和最终长度）
+    if use_length_penalty:
+        assert response_lengths is not None
+        assert len(response_lengths) == len(solution_strs)
+        valid_response_lengths = [response_lengths[i] for i in valid_indices]
+
+
+    # 仅处理有效条目
     if valid_draft_strs:
-        valid_draft_scores = get_rewards_from_server(
-            src_langs=valid_src_lang,
-            trg_langs=valid_trg_lang,
-            ref_langs=valid_trg_lang,
-            src_texts=valid_src_text,
-            ref_texts=valid_trg_text,
-            response_texts=valid_draft_strs,
-            rm_type="direct",
-            server_url=server_url,
-            batch_size=batch_size,
-        )
+        # 辅助函数：处理分数计算流程
+        
 
-        valid_answer_scores = get_rewards_from_server(
-            src_langs=valid_src_lang,
-            trg_langs=valid_trg_lang,
-            ref_langs=valid_trg_lang,
-            src_texts=valid_src_text,
-            ref_texts=valid_trg_text,
-            response_texts=valid_answer_strs,
-            rm_type="direct",
-            server_url=server_url,
-            batch_size=batch_size,
+        # 计算草稿分数
+        draft_scores = get_tranlation_scores(
+            valid_draft_strs,
+            valid_src_lang,
+            valid_trg_lang,
+            valid_src_text,
+            valid_trg_text,
+            server_url,
+            batch_size,
+            normalize_type=normalize_type,
+            normalize_scale=normalize_scale,
+            use_src_text=use_src_text,
+            use_ref_text=use_ref_text,
+            texts_en=valid_en_text,
+            en_proxy_reward=en_proxy_reward,
+            use_bleu_penalty=use_bleu_penalty,
+            use_length_penalty=use_length_penalty,
         )
-
+        
+        # 计算最终答案分数
+        answer_scores = get_tranlation_scores(
+            valid_answer_strs,
+            valid_src_lang,
+            valid_trg_lang,
+            valid_src_text,
+            valid_trg_text,
+            server_url,
+            batch_size,
+            normalize_type=normalize_type,
+            normalize_scale=normalize_scale,
+            use_src_text=use_src_text,
+            use_ref_text=use_ref_text,
+            texts_en=valid_en_text,
+            en_proxy_reward=en_proxy_reward,
+            use_bleu_penalty=use_bleu_penalty,
+            use_length_penalty=use_length_penalty,
+        )
+        
+        # 调试信息
+        print(f"[Info] draft score avg: {sum(draft_scores) / len(draft_scores):.4f}")
+        print(f"[Info] answer score avg: {sum(answer_scores) / len(answer_scores):.4f}")
         print(
-            "[Info] draft score avg: ",
-            sum(valid_draft_scores) / len(valid_draft_scores),
+            f"[Info] delta score avg: "
+            f"{(sum(answer_scores) - sum(draft_scores)) / len(answer_scores):.4f}"
         )
-        print(
-            "[Info] answer score avg: ",
-            sum(valid_answer_scores) / len(valid_answer_scores),
-        )
-        print(
-            "[Info] delta score avg: ",
-            (sum(valid_answer_scores) - sum(valid_draft_scores))
-            / len(valid_answer_scores),
-        )
-
-        final_score = [
-            fusion_fn(d, a)
-            for d, a in zip(valid_draft_scores, valid_answer_scores)
+        
+        # 融合分数
+        final_scores = [
+            fusion_fn(d, a) 
+            for d, a in zip(draft_scores, answer_scores)
         ]
 
-        for idx, score in zip(valid_indices, final_score):
-            scores[idx] = score
+        scores = apply_response_length_penalty(
+            scores,
+            valid_response_lengths,
+            max_response_len=filter_max_len,
+            penalty_buffer_len=penalty_buffer_len,
+            clip_score=score_lower_bound,
+        )
+        
+        # 更新有效索引的分数
+        for idx, score in zip(valid_indices, final_scores):
+            final_scores[idx] = score
 
+    return final_scores
+
+
+
+
+def get_tranlation_scores(
+    texts_mt, 
+    langs_src, 
+    langs_trg, 
+    texts_src, 
+    texts_trg,
+    server_url,
+    batch_size,
+    normalize_type,
+    normalize_scale,
+    use_src_text = True,
+    use_ref_text = True,
+    texts_en = None,
+    en_proxy_reward = False,
+    use_bleu_penalty = False,
+    use_length_penalty = False,
+):
+    """统一处理分数计算流程"""
+    # 获取原始分数
+    if en_proxy_reward:
+        assert texts_en is not None
+        raw_scores = get_rewards_from_server(
+            src_langs=["en"] * len(texts_mt),
+            trg_langs=langs_trg,
+            response_texts=texts_mt,
+            server_url=server_url,
+            batch_size=batch_size,
+            src_texts=texts_en if use_src_text else None,
+            ref_texts=texts_trg if use_ref_text else None,
+        )
+    else:
+        raw_scores = get_rewards_from_server(
+            src_langs=langs_src,
+            trg_langs=langs_trg,
+            response_texts=texts_mt,
+            server_url=server_url,
+            batch_size=batch_size,
+            src_texts=texts_src if use_src_text else None,
+            ref_texts=texts_trg if use_ref_text else None,
+        )
+    
+    # 分数归一化
+    if normalize_type == "zero2one":
+        scores = [score_normalize(s, 0, 1) for s in raw_scores]
+    elif normalize_type == "scale":
+        scores = [s * normalize_scale for s in raw_scores]
+    elif normalize_type == "none":
+        scores = raw_scores
+    else:
+        raise ValueError(f"Invalid normalize_type: {normalize_type}")
+    
+    # BLEU惩罚
+    if use_bleu_penalty:
+        penalties = get_bleu_penalty(
+            texts_mt,
+            texts_src,
+            texts_trg,
+            langs_src,
+        )
+        scores = [s - p for s, p in zip(scores, penalties)]
+    
+    # 长度惩罚
+    if use_length_penalty:
+        scores = apply_length_penalty(
+            scores,
+            texts_mt,
+            texts_trg,
+        )
+    
     return scores
 
 
@@ -600,7 +704,8 @@ def compute_length_penalty(length: int, min_length: int, max_length: int):
     return score_normalize(penalty, 0, 1)
 
 
-def get_length_penalty(
+def apply_length_penalty(
+    scores: list,
     mt_list: list,
     ref_list: list,
     min_length_factor: float = 2,
@@ -620,29 +725,39 @@ def get_length_penalty(
             max(length_penalty),
         )
     )
-    return length_penalty
+
+    scores = [s - p for s, p in zip(scores, length_penalty)]
+    return scores
 
 
-def apply_length_penalty_filter(
+def apply_response_length_penalty(
     scores: list,
-    mt_list: list,
-    ref_list: list,
     response_token_len: list,
     max_response_len: int,
-    filtered_score: float = 0.0,
+    penalty_buffer_len: int,
+    clip_score: float = 0.0, # score for response len >= max_response_len
 ):
+    """
+    Penalty based on response len.
+    The penalty increases from 0 to 1 as the response length changes from max_response_len-penalty_buffer_len to max_response_len.
+    For response length exceeds (or equal to) max_response_len, the penalty is clip_score.
+    """
+    length_penalty = [
+        compute_length_penalty(
+            length_item, max_response_len-penalty_buffer_len, max_response_len
+        )
+        for length_item in response_token_len
+    ]
+    scores = [s - p for s, p in zip(scores, length_penalty)]
 
-    penalty_scores = get_length_penalty(mt_list, ref_list)
-    scores = [s - p for s, p in zip(scores, penalty_scores)]
-
-    filter_count = 0
-    for i in range(len(response_token_len)):  # overwrite scores
+    filtered_count = 0
+    for i in range(len(response_token_len)):
         if response_token_len[i] >= max_response_len:
-            scores[i] = filtered_score
-            filter_count += 1
+            scores[i] = clip_score
+            filtered_count += 1
     print(
-        "[Info] length filtered sample: {} / {} - min: {}  max: {} mean: {}".format(
-            filter_count,
+        "[Info] length filtered sample: {} / {} - min: {}  max: {} mean: {:.2f}".format(
+            filtered_count,
             len(scores),
             min(response_token_len),
             max(response_token_len),
