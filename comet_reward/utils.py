@@ -164,7 +164,13 @@ def extract_markdown(solution_str: str):
     presence_tags = ["# Analysis", "# Translation"]
     if not presence_checker(solution_str, presence_tags, force_once=True):
         return None
-    return extract_last_line(solution_str)
+    
+    lines = solution_str.strip().split("\n")
+    if lines[0] != presence_tags[0]:
+        return None
+    if lines[-2] != presence_tags[1]:
+        return None
+    return lines[-1]
 
 def extract_no_thinking_translation(solution_str: str):
     """Extracts the final answer from the model's response string.
