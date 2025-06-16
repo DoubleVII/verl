@@ -157,6 +157,15 @@ def extract_last_line(solution_str: str):
     lines = solution_str.strip().split("\n")
     return lines[-1]
 
+
+def extract_markdown(solution_str: str):
+    """Extracts the last line from markdown response.
+    """
+    presence_tags = ["# Analysis", "# Translation"]
+    if not presence_checker(solution_str, presence_tags, force_once=True):
+        return None
+    return extract_last_line(solution_str)
+
 def extract_no_thinking_translation(solution_str: str):
     """Extracts the final answer from the model's response string.
 
@@ -236,6 +245,8 @@ def compute_score(
         solution_strs = [extract_no_thinking_translation(s) for s in solution_strs]
     elif use_extract_translation == "last_line":
         solution_strs = [extract_last_line(s) for s in solution_strs]
+    elif use_extract_translation == "markdown":
+        solution_strs = [extract_markdown(s) for s in solution_strs]
     elif use_extract_translation == "none":
         pass
     else:
