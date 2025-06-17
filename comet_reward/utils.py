@@ -218,6 +218,7 @@ def compute_score(
     use_length_penalty: bool = False,
     filter_max_len: int = 1024,
     penalty_buffer_len: int = 256,
+    short_penalty_buffer_len: int = 0,
     response_lengths: list[int] = None,
     en_proxy_reward: bool = False,
     normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
@@ -314,6 +315,7 @@ def compute_score(
             max_response_len=filter_max_len,
             penalty_buffer_len=penalty_buffer_len,
             clip_score=score_lower_bound,
+            min_response_len=short_penalty_buffer_len,
         )
 
         scores = lower_bound_clip(scores, score_lower_bound)
@@ -786,11 +788,14 @@ def apply_response_length_penalty(
     max_response_len: int,
     penalty_buffer_len: int,
     clip_score: float = 0.0, # score for response len >= max_response_len
+    min_response_len: int = 0, # min response len
 ):
     """
     Penalty based on response len.
     The penalty increases from 0 to 1 as the response length changes from max_response_len-penalty_buffer_len to max_response_len.
     For response length exceeds (or equal to) max_response_len, the penalty is clip_score.
+
+    If min_response_len > 0, the penalty will be applied to response length less than min_response_len from 0 to 1 as length changes from min_response_len to 0.
     """
     length_penalty = [
         compute_length_penalty(
@@ -799,6 +804,16 @@ def apply_response_length_penalty(
         for length_item in response_token_len
     ]
     scores = [s - p for s, p in zip(scores, length_penalty)]
+
+    if min_response_len > 0:
+        length_penalty = [
+            1-compute_length_penalty(
+                length_item, 0, min_response_len
+            )
+            for length_item in response_token_len
+        ]
+        scores = [s - p for s, p in zip(scores, length_penalty)]
+
 
     filtered_count = 0
     for i in range(len(response_token_len)):
