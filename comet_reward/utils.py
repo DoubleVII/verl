@@ -316,6 +316,8 @@ def compute_score(
             clip_score=score_lower_bound,
         )
 
+        scores = lower_bound_clip(scores, score_lower_bound)
+
         for idx, score in zip(valid_indices, scores):
             final_scores[idx] = score
 
@@ -812,4 +814,14 @@ def apply_response_length_penalty(
             len(scores),
         )
     )
+    return scores
+
+
+def lower_bound_clip(scores: list, lower_bound_score: float = 0.0):
+    """
+    Clip scores to lower_bound_score.
+    """
+    for i in range(len(scores)):
+        if scores[i] < lower_bound_score:
+            scores[i] = lower_bound_score
     return scores
