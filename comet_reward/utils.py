@@ -266,8 +266,17 @@ def compute_score(
     src_lang = [l.split("-")[0] for l in lg]
     trg_lang = [l.split("-")[1] for l in lg]
 
-
-    extra_reward_info = [{"score": score_lower_bound} for _ in solution_strs]
+    extra_reward_info = [
+        {
+            "score": score_lower_bound,
+            "mt_score": 0.0,
+            "bleu_penalty": 0.0,
+            "mt_length_penalty": 0.0,
+            "long_resp_length_penalty": 0.0,
+            "short_resp_length_penalty": 0.0,
+        }
+        for _ in solution_strs
+    ]
 
     # 筛选非None的索引和对应数据
     valid_indices = [i for i, s in enumerate(solution_strs) if s is not None]
@@ -276,6 +285,7 @@ def compute_score(
     valid_src_text = [src_text[i] for i in valid_indices]
     valid_trg_text = [tgt_text[i] for i in valid_indices]
     valid_solution_strs = [solution_strs[i] for i in valid_indices]
+    valid_extra_reward_info = [extra_reward_info[i] for i in valid_indices]
 
     if en_proxy_reward:
         assert "en_text" in extra_infos[0]
@@ -288,7 +298,6 @@ def compute_score(
         assert response_lengths is not None
         assert len(response_lengths) == len(solution_strs)
         valid_response_lengths = [response_lengths[i] for i in valid_indices]
-
 
     # 仅对非None条目获取分数
     if valid_solution_strs:
@@ -307,7 +316,7 @@ def compute_score(
             texts_en=valid_en_text,
             use_bleu_penalty=use_bleu_penalty,
             use_length_penalty=use_length_penalty,
-            extra_reward_info=extra_reward_info,
+            extra_reward_info=valid_extra_reward_info,
         )
         scores = apply_response_length_penalty(
             scores,
@@ -316,7 +325,7 @@ def compute_score(
             penalty_buffer_len=penalty_buffer_len,
             clip_score=score_lower_bound,
             min_response_len=short_penalty_buffer_len,
-            extra_reward_info=extra_reward_info,
+            extra_reward_info=valid_extra_reward_info,
         )
 
         scores = lower_bound_clip(scores, score_lower_bound)
@@ -364,7 +373,6 @@ def extract_translation_progressive(solution_strs: str) -> tuple[str, str]:
             answer_text = None
 
     return draft_text, answer_text
-
 
 
 def extract_translation_flexible_progressive(solution_strs: str) -> tuple[str, str]:
@@ -430,7 +438,6 @@ def final_score(draft_score, answer_score):
     # draft_score = score_normalize(draft_score, 0, 1)
     answer_score = score_normalize(answer_score, 0, 1)
     return answer_score
-
 
 
 def compute_score_progressive(
@@ -595,8 +602,6 @@ def compute_score_progressive(
             final_scores[idx] = score
 
     return final_scores
-
-
 
 
 def get_tranlation_scores(
