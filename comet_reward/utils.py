@@ -267,8 +267,7 @@ def compute_score(
     trg_lang = [l.split("-")[1] for l in lg]
 
 
-    # 初始化全0分数列表
-    final_scores = [score_lower_bound] * len(solution_strs)
+    extra_reward_info = [{"score": score_lower_bound} for _ in solution_strs]
 
     # 筛选非None的索引和对应数据
     valid_indices = [i for i, s in enumerate(solution_strs) if s is not None]
@@ -308,6 +307,7 @@ def compute_score(
             texts_en=valid_en_text,
             use_bleu_penalty=use_bleu_penalty,
             use_length_penalty=use_length_penalty,
+            extra_reward_info=extra_reward_info,
         )
         scores = apply_response_length_penalty(
             scores,
@@ -316,14 +316,15 @@ def compute_score(
             penalty_buffer_len=penalty_buffer_len,
             clip_score=score_lower_bound,
             min_response_len=short_penalty_buffer_len,
+            extra_reward_info=extra_reward_info,
         )
 
         scores = lower_bound_clip(scores, score_lower_bound)
 
         for idx, score in zip(valid_indices, scores):
-            final_scores[idx] = score
+            extra_reward_info[idx]["score"] = score
 
-    return final_scores
+    return extra_reward_info
 
 
 def extract_translation_progressive(solution_strs: str) -> tuple[str, str]:
@@ -614,6 +615,7 @@ def get_tranlation_scores(
     en_proxy_reward = False,
     use_bleu_penalty = False,
     use_length_penalty = False,
+    extra_reward_info = None,
 ):
     """统一处理分数计算流程"""
     # 获取原始分数
@@ -649,6 +651,10 @@ def get_tranlation_scores(
     else:
         raise ValueError(f"Invalid normalize_type: {normalize_type}")
     
+    if extra_reward_info is not None:
+        for i, score in enumerate(scores):
+            extra_reward_info[i]["mt_score"] = score
+    
     # BLEU惩罚
     if use_bleu_penalty:
         penalties = get_bleu_penalty(
@@ -658,6 +664,9 @@ def get_tranlation_scores(
             langs_src,
         )
         scores = [s - p for s, p in zip(scores, penalties)]
+        if extra_reward_info is not None:
+            for i, penalty in enumerate(penalties):
+                extra_reward_info[i]["bleu_penalty"] = penalty
     
     # 长度惩罚
     if use_length_penalty:
@@ -666,6 +675,9 @@ def get_tranlation_scores(
             texts_mt,
             texts_trg,
         )
+        if extra_reward_info is not None:
+            for i, score in enumerate(scores):
+                extra_reward_info[i]["mt_length_penalty"] = score
     
     return scores
 
@@ -789,6 +801,7 @@ def apply_response_length_penalty(
     penalty_buffer_len: int,
     clip_score: float = 0.0, # score for response len >= max_response_len
     min_response_len: int = 0, # min response len
+    extra_reward_info: list[dict] = None,
 ):
     """
     Penalty based on response len.
@@ -803,6 +816,11 @@ def apply_response_length_penalty(
         )
         for length_item in response_token_len
     ]
+
+    if extra_reward_info is not None:
+        for i in range(len(scores)):
+            extra_reward_info[i]["long_resp_length_penalty"] = length_penalty[i]
+    
     scores = [s - p for s, p in zip(scores, length_penalty)]
 
     if min_response_len > 0:
@@ -814,6 +832,9 @@ def apply_response_length_penalty(
         ]
         scores = [s - p for s, p in zip(scores, length_penalty)]
 
+        if extra_reward_info is not None:
+            for i in range(len(scores)):
+                extra_reward_info[i]["short_resp_length_penalty"] = length_penalty[i]
 
     filtered_count = 0
     for i in range(len(response_token_len)):
