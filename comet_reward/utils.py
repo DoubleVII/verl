@@ -828,7 +828,7 @@ def apply_response_length_penalty(
             for i in range(len(scores)):
                 extra_reward_info[i]["long_resp_length_penalty"] = length_penalty[i]
         
-    scores = [s - p for s, p in zip(scores, length_penalty)]
+        scores = [s - p for s, p in zip(scores, length_penalty)]
 
     if min_response_len > 0:
         length_penalty = [
