@@ -645,6 +645,10 @@ def get_tranlation_scores(
             src_texts=texts_src if use_src_text else None,
             ref_texts=texts_trg if use_ref_text else None,
         )
+
+    if extra_reward_info is not None:
+        for i, raw_score in enumerate(raw_scores):
+            extra_reward_info[i]["mt_score"] = raw_score
     
     # 分数归一化
     if normalize_type == "zero2one":
@@ -656,9 +660,6 @@ def get_tranlation_scores(
     else:
         raise ValueError(f"Invalid normalize_type: {normalize_type}")
     
-    if extra_reward_info is not None:
-        for i, score in enumerate(scores):
-            extra_reward_info[i]["mt_score"] = score
     
     # BLEU惩罚
     if use_bleu_penalty:
