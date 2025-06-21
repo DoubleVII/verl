@@ -848,15 +848,7 @@ def apply_response_length_penalty(
         if response_token_len[i] >= max_response_len:
             scores[i] = clip_score
             filtered_count += 1
-    print(
-        "[Info] response length penalty avg - {:.3f}  min - {:.3f}  max - {:.3f} - filtered - {} / {}".format(
-            sum(length_penalty) / len(length_penalty),
-            min(length_penalty),
-            max(length_penalty),
-            filtered_count,
-            len(scores),
-        )
-    )
+            
     return scores
 
 
