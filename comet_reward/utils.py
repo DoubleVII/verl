@@ -172,6 +172,26 @@ def extract_markdown(solution_str: str):
         return None
     return lines[-1]
 
+def extract_markdown_no_think(solution_str: str):
+    """Extracts the last line from markdown response. No Analysis line.
+    """
+    presence_tags = ["# Translation"]
+    if not presence_checker(solution_str, presence_tags, force_once=True):
+        return None
+    
+    lines = solution_str.strip().split("\n")
+    if lines[-2] != presence_tags[1]:
+        return None
+    return lines[-1]
+
+
+def extract_markdown_optional(solution_str: str):
+    """Combination of extract_markdown and extract_markdown_no_think.
+    """
+    if solution_str.strip().count("\n") == 1:
+        return extract_markdown_no_think(solution_str)
+    return extract_markdown(solution_str)
+
 def extract_no_thinking_translation(solution_str: str):
     """Extracts the final answer from the model's response string.
 
@@ -254,6 +274,8 @@ def compute_score(
         solution_strs = [extract_last_line(s) for s in solution_strs]
     elif use_extract_translation == "markdown":
         solution_strs = [extract_markdown(s) for s in solution_strs]
+    elif use_extract_translation == "markdown_optional":
+        solution_strs = [extract_markdown_optional(s) for s in solution_strs]
     elif use_extract_translation == "none":
         pass
     else:
@@ -848,7 +870,7 @@ def apply_response_length_penalty(
         if response_token_len[i] >= max_response_len:
             scores[i] = clip_score
             filtered_count += 1
-            
+
     return scores
 
 
