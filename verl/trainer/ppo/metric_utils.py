@@ -24,6 +24,7 @@ import torch
 
 from verl import DataProto
 from verl.utils.import_utils import deprecated
+import warnings
 
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
@@ -165,6 +166,18 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
+    return metrics
+
+def compute_custom_metrics(batch: DataProto, custom_keys: List[str] = None) -> Dict[str, Any]:
+    if custom_keys is None:
+        custom_keys = []
+    
+    metrics = {}
+    for key in custom_keys:
+        if isinstance(batch.non_tensor_batch[key], np.ndarray):
+            metrics[f"custom/{key}"] = batch.non_tensor_batch[key].mean().item()
+        else:
+            warnings.warn(f"Custom key {key} is not a numpy array, will skip it.")
     return metrics
 
 
