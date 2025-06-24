@@ -180,7 +180,7 @@ def extract_markdown_no_think(solution_str: str):
         return None
     
     lines = solution_str.strip().split("\n")
-    if lines[-2] != presence_tags[1]:
+    if lines[-2] != presence_tags[0]:
         return None
     return lines[-1]
 
