@@ -401,3 +401,195 @@ class vLLMAsyncRollout:
             return self.wake_up(*args, **kwargs)
         else:
             return self.inference_engine.execute_method(method, *args, **kwargs)
+
+
+class vLLMRolloutForceDecoding(vLLMRollout):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        force_decoding_config = self.config.get("force_decoding", None)
+        print(f"force_decoding_config: {force_decoding_config}")
+        if force_decoding_config is None:
+            raise ValueError("force_decoding config is None")
+        if len(force_decoding_config.leading_tokens_list) != len(force_decoding_config.sampling_n_list):
+            raise ValueError("leading_tokens_list and sampling_n_list must have the same length")
+
+        self.force_decoding_sampling_n = sum(force_decoding_config.sampling_n_list)
+        if self.force_decoding_sampling_n != self.sampling_params.n:
+            raise ValueError(f"sampling_n_list must sum up to n, but got {self.force_decoding_sampling_n} != {self.sampling_params.n}")
+        
+        self.force_decoding_group_list = []
+        for leading_tokens, sampling_n in zip(force_decoding_config.leading_tokens_list, force_decoding_config.sampling_n_list):
+            self.force_decoding_group_list.append({"leading_tokens": leading_tokens, "sampling_n": sampling_n})
+
+        self.max_leading_tokens_len = max(len(leading_tokens) for leading_tokens in force_decoding_config.leading_tokens_list)
+        print(f"Initializing ForceDecoding Rollout\nforce_decoding_group_list: {self.force_decoding_group_list}")
+
+
+    def preprocess_vllm_inputs(self, vllm_inputs: list[dict]) -> list[dict]:
+        out_vllm_inputs = []
+        for vllm_input in vllm_inputs:
+            prompt_token_ids = vllm_input["prompt_token_ids"]
+            assert isinstance(prompt_token_ids, list)
+            for force_decoding_group in self.force_decoding_group_list:
+                leading_tokens = force_decoding_group["leading_tokens"]
+                sampling_n = force_decoding_group["sampling_n"]
+                for _ in range(sampling_n):
+                    new_vllm_input = {**vllm_input}
+                    new_vllm_input["prompt_token_ids"] = prompt_token_ids + leading_tokens
+                    out_vllm_inputs.append(new_vllm_input)
+        return out_vllm_inputs
+        
+
+    def postprocess_vllm_outputs(self, vllm_outputs: list[dict]) -> list:
+        batch_size = len(vllm_outputs) // self.force_decoding_sampling_n
+        out_vllm_outputs = []
+        cur_idx = 0
+        for _ in range(batch_size):
+            for force_decoding_group in self.force_decoding_group_list:
+                leading_tokens = force_decoding_group["leading_tokens"]
+                sampling_n = force_decoding_group["sampling_n"]
+                for _ in range(sampling_n):
+                    response_ids = vllm_outputs[cur_idx].outputs[0].token_ids
+                    out_vllm_outputs.append(leading_tokens + response_ids)
+                    cur_idx += 1
+        return out_vllm_outputs
+
+    @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
+    @torch.no_grad()
+    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+        is_validate = prompts.meta_info.get("validate", False)
+        if is_validate: # cancel force decoding in validation
+            return super().generate_sequences(prompts, **kwargs)
+        # rebuild vllm cache engine
+        if (
+            vllm_version
+            in (
+                "0.5.4",
+                "0.6.3",
+            )
+            and self.config.free_cache_engine
+        ):
+            self.inference_engine.init_cache_engine()
+
+        idx = prompts.batch["input_ids"]  # (bs, prompt_length)
+        # left-padded attention_mask
+        attention_mask = prompts.batch["attention_mask"]
+        position_ids = prompts.batch["position_ids"]
+
+        # used to construct attention_mask
+        eos_token_id = prompts.meta_info["eos_token_id"]
+
+        batch_size = idx.size(0)
+
+        non_tensor_batch = prompts.non_tensor_batch
+        if "raw_prompt_ids" not in non_tensor_batch:
+            non_tensor_batch["raw_prompt_ids"] = np.array([_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
+
+        if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
+            raise RuntimeError("vllm sharding manager is not work properly.")
+
+        if "multi_modal_data" in non_tensor_batch:
+            vllm_inputs = []
+            for raw_prompt_ids, multi_modal_data in zip(non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data")):
+                vllm_inputs.append({"prompt_token_ids": raw_prompt_ids, "multi_modal_data": multi_modal_data})
+        else:
+            vllm_inputs = [{"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")]
+
+        # ensure the type of `prompt_token_ids` passed to vllm is list[int]
+        # https://github.com/volcengine/verl/pull/772
+        for input_data in vllm_inputs:
+            if isinstance(input_data["prompt_token_ids"], np.ndarray):
+                input_data["prompt_token_ids"] = input_data["prompt_token_ids"].tolist()
+            elif not isinstance(input_data["prompt_token_ids"], list):
+                raise TypeError(f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}")
+
+        do_sample = prompts.meta_info.get("do_sample", True)
+        if not do_sample:
+            kwargs = {
+                "best_of": 1,
+                "top_p": 1.0,
+                "top_k": -1,
+                "min_p": 0.0,
+                "temperature": 0,
+                "n": 1,  # if greedy, only 1 response
+            }
+        elif is_validate:
+            # TODO: try **
+            kwargs = {
+                "top_k": self.config.val_kwargs.top_k,
+                "top_p": self.config.val_kwargs.top_p,
+                "temperature": self.config.val_kwargs.temperature,
+                "n": 1,  # if validate, already repeat in ray_trainer
+            }
+
+        kwargs["n"] = 1 # if force decoding, already repeat in preprocess_vllm_inputs
+        kwargs["max_tokens"] = self.config.response_length - self.max_leading_tokens_len
+
+        # users can customize different sampling_params at different run
+        with self.update_sampling_params(**kwargs):
+            vllm_inputs = self.preprocess_vllm_inputs(vllm_inputs)
+            outputs = self.inference_engine.generate(
+                prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                sampling_params=self.sampling_params,
+                use_tqdm=False,
+            )
+
+            # TODO(sgm): disable logprob when recompute_log_prob is enable
+            # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
+
+            response = self.postprocess_vllm_outputs(outputs)
+
+            response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(idx.device)
+
+        if self.sampling_params.n > 1 and do_sample:
+            idx = _repeat_interleave(idx, self.sampling_params.n)
+            attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
+            position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
+            batch_size = batch_size * self.sampling_params.n
+            # NOTE(linjunrong): for multi-turn https://github.com/volcengine/verl/pull/1037
+            if "tools_kwargs" in non_tensor_batch.keys():
+                non_tensor_batch["tools_kwargs"] = _repeat_interleave(non_tensor_batch["tools_kwargs"], self.sampling_params.n)
+
+        seq = torch.cat([idx, response], dim=-1)
+
+        response_length = response.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
+        if position_ids.dim() == 3:  # qwen2vl mrope
+            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
+
+        # TODO(sgm): fix position_ids on right_pad
+        # prompt: left pad + response: right pad
+        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
+        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
+        response_position_ids = position_ids[..., -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
+        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+
+        # all the tp ranks should contain the same data here. data in all ranks are valid
+        batch = TensorDict(
+            {
+                "prompts": idx,
+                "responses": response,
+                "input_ids": seq,  # here input_ids become the whole sentences
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                # 'rollout_log_probs': rollout_log_probs, # we remove rollout_log_probs in force decoding, we will recompute old log prob with actor
+            },
+            batch_size=batch_size,
+        )
+
+        # free vllm cache engine
+        if (
+            vllm_version
+            in (
+                "0.5.4",
+                "0.6.3",
+            )
+            and self.config.free_cache_engine
+        ):
+            self.inference_engine.free_cache_engine()
+
+        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)        

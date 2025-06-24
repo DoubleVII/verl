@@ -388,9 +388,12 @@ class ActorRolloutRefWorker(Worker):
                     trust_remote_code=trust_remote_code,
                 )
             elif vllm_mode == "spmd":
-                from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+                from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout, vLLMRolloutForceDecoding
 
-                vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
+                if self.config.rollout.mode == "force_decoding":
+                    vllm_rollout_cls = vLLMRolloutForceDecoding
+                else:
+                    vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
                 rollout = vllm_rollout_cls(
                     model_path=local_path,
                     config=self.config.rollout,
@@ -400,7 +403,7 @@ class ActorRolloutRefWorker(Worker):
                     trust_remote_code=trust_remote_code,
                 )
             else:
-                raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
+                raise NotImplementedError("vllm_mode must be 'customized', 'spmd' or 'force_decoding'")
 
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
             if torch.distributed.get_world_size() == 1:
