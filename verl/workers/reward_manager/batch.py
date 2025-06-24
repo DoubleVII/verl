@@ -57,6 +57,7 @@ class BatchRewardManager:
             ground_truths=ground_truths,
             extra_infos=extras,
             response_lengths=valid_response_lengths.tolist(),
+            tokenizer=self.tokenizer,
             **self.reward_kwargs,
         )
 

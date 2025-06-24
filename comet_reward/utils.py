@@ -246,7 +246,7 @@ def compute_score(
     use_length_penalty: bool = False,
     filter_max_len: int = 1024,
     penalty_buffer_len: int = 256,
-    short_penalty_buffer_len: int = 0,
+    short_penalty_factor: float = 0,
     response_lengths: list[int] = None,
     en_proxy_reward: bool = False,
     normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
@@ -254,6 +254,7 @@ def compute_score(
     score_lower_bound: float = 0.0,
     use_src_text: bool = True,
     use_ref_text: bool = True,
+    tokenizer=None,
 ):
     """
     batch compute score
@@ -317,6 +318,11 @@ def compute_score(
     valid_solution_strs = [solution_strs[i] for i in valid_indices]
     valid_extra_reward_info = [extra_reward_info[i] for i in valid_indices]
 
+    valid_solution_lengths = None
+    if tokenizer is not None:
+        valid_solution_tokens = tokenizer(valid_solution_strs)
+        valid_solution_lengths = [len(t) for t in valid_solution_tokens.input_ids]
+
     if en_proxy_reward:
         assert "en_text" in extra_infos[0]
         en_text = [extra_infos_item["en_text"] for extra_infos_item in extra_infos]
@@ -324,10 +330,9 @@ def compute_score(
     else:
         valid_en_text = None
 
-    if use_length_penalty:
-        assert response_lengths is not None
-        assert len(response_lengths) == len(solution_strs)
-        valid_response_lengths = [response_lengths[i] for i in valid_indices]
+    assert response_lengths is not None
+    assert len(response_lengths) == len(solution_strs)
+    valid_response_lengths = [response_lengths[i] for i in valid_indices]
 
     # 仅对非None条目获取分数
     if valid_solution_strs:
@@ -351,10 +356,11 @@ def compute_score(
         scores = apply_response_length_penalty(
             scores,
             valid_response_lengths,
+            valid_solution_lengths,
             max_response_len=filter_max_len,
             penalty_buffer_len=penalty_buffer_len,
             clip_score=score_lower_bound,
-            min_response_len=short_penalty_buffer_len,
+            short_penalty_factor=short_penalty_factor,
             extra_reward_info=valid_extra_reward_info,
         )
 
@@ -379,7 +385,7 @@ def compute_score_hybrid(
     use_length_penalty: bool = False,
     filter_max_len: int = 1024,
     penalty_buffer_len: int = 256,
-    short_penalty_buffer_len: int = 0,
+    short_penalty_factor: float = 0,
     response_lengths: list[int] = None,
     en_proxy_reward: bool = False,
     normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
@@ -387,6 +393,7 @@ def compute_score_hybrid(
     score_lower_bound: float = 0.0,
     use_src_text: bool = True,
     use_ref_text: bool = True,
+    tokenizer=None,
 ):
     """
     batch compute score
@@ -445,6 +452,11 @@ def compute_score_hybrid(
     valid_extra_reward_info = [extra_reward_info[i] for i in valid_indices]
     valid_think_marks = [think_marks[i] for i in valid_indices]
 
+    valid_solution_lengths = None
+    if tokenizer is not None:
+        valid_solution_tokens = tokenizer(valid_solution_strs)
+        valid_solution_lengths = [len(t) for t in valid_solution_tokens.input_ids]
+
     if en_proxy_reward:
         assert "en_text" in extra_infos[0]
         en_text = [extra_infos_item["en_text"] for extra_infos_item in extra_infos]
@@ -482,15 +494,17 @@ def compute_score_hybrid(
         think_scores = [scores[i] for i in think_indices]
         think_lengths = [valid_response_lengths[i] for i in think_indices]
         think_extra_reward = [valid_extra_reward_info[i] for i in think_indices]
+        think_solution_lengths = [valid_solution_lengths[i] for i in think_indices] if valid_solution_lengths is not None else None
 
         if think_indices:
             penalized_think_scores = apply_response_length_penalty(
                 think_scores,
                 think_lengths,
+                think_solution_lengths,
                 max_response_len=filter_max_len,
                 penalty_buffer_len=penalty_buffer_len,
                 clip_score=score_lower_bound,
-                min_response_len=short_penalty_buffer_len,
+                short_penalty_factor=short_penalty_factor,
                 extra_reward_info=think_extra_reward,
             )
             
@@ -968,10 +982,11 @@ def apply_length_penalty(
 def apply_response_length_penalty(
     scores: list,
     response_token_len: list,
+    translation_token_len: list,
     max_response_len: int,
     penalty_buffer_len: int,
     clip_score: float = 0.0, # score for response len >= max_response_len
-    min_response_len: int = 0, # min response len
+    short_penalty_factor: float = 0,
     extra_reward_info: list[dict] = None,
 ):
     """
@@ -979,7 +994,7 @@ def apply_response_length_penalty(
     The penalty increases from 0 to 1 as the response length changes from max_response_len-penalty_buffer_len to max_response_len.
     For response length exceeds (or equal to) max_response_len, the penalty is clip_score.
 
-    If min_response_len > 0, the penalty will be applied to response length less than min_response_len from 0 to 1 as length changes from min_response_len to 0.
+    If short_penalty_factor > 0, the penalty will be applied to short response from 0 to 0.5 as response length changes from short_penalty_factor*translation_token_len to 0.
     """
     if penalty_buffer_len > 0:
         length_penalty = [
@@ -995,12 +1010,12 @@ def apply_response_length_penalty(
         
         scores = [s - p for s, p in zip(scores, length_penalty)]
 
-    if min_response_len > 0:
+    if short_penalty_factor > 0 and translation_token_len is not None:
         length_penalty = [
-            1-compute_length_penalty(
-                length_item, 0, min_response_len
-            )
-            for length_item in response_token_len
+            0.5*(1-compute_length_penalty(
+                resp_len, 0, short_penalty_factor*trans_len
+            ))
+            for resp_len, trans_len in zip(response_token_len, translation_token_len)
         ]
         scores = [s - p for s, p in zip(scores, length_penalty)]
 
