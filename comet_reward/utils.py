@@ -850,10 +850,8 @@ def get_tranlation_scores(
             scores,
             texts_mt,
             texts_trg,
+            extra_reward_info=extra_reward_info,
         )
-        if extra_reward_info is not None:
-            for i, score in enumerate(scores):
-                extra_reward_info[i]["mt_length_penalty"] = score
     
     return scores
 
@@ -950,6 +948,7 @@ def apply_length_penalty(
     ref_list: list,
     min_length_factor: float = 2,
     max_length_factor: float = 4,
+    extra_reward_info: list[dict] = None,
 ):
     length_penalty = [
         compute_length_penalty(
@@ -958,13 +957,9 @@ def apply_length_penalty(
         for mt, ref in zip(mt_list, ref_list)
     ]
 
-    print(
-        "[Info] length penalty avg - {:.3f}  min - {:.3f}  max - {:.3f}".format(
-            sum(length_penalty) / len(length_penalty),
-            min(length_penalty),
-            max(length_penalty),
-        )
-    )
+    if extra_reward_info is not None:
+        for i, penalty in enumerate(length_penalty):
+            extra_reward_info[i]["mt_length_penalty"] = penalty
 
     scores = [s - p for s, p in zip(scores, length_penalty)]
     return scores
