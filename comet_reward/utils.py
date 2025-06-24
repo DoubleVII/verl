@@ -185,12 +185,20 @@ def extract_markdown_no_think(solution_str: str):
     return lines[-1]
 
 
-def extract_markdown_optional(solution_str: str):
+def extract_markdown_optional(solution_str: str, return_dict:bool = False):
     """Combination of extract_markdown and extract_markdown_no_think.
     """
+    extracted_translation = None
+    is_think = False
     if solution_str.strip().count("\n") == 1:
-        return extract_markdown_no_think(solution_str)
-    return extract_markdown(solution_str)
+        extracted_translation = extract_markdown_no_think(solution_str)
+    else:
+        extracted_translation = extract_markdown(solution_str)
+        is_think = True
+    
+    if return_dict:
+        return {"translation": extracted_translation, "is_think": is_think}
+    return extracted_translation
 
 def extract_no_thinking_translation(solution_str: str):
     """Extracts the final answer from the model's response string.
@@ -349,6 +357,146 @@ def compute_score(
             min_response_len=short_penalty_buffer_len,
             extra_reward_info=valid_extra_reward_info,
         )
+
+        scores = lower_bound_clip(scores, score_lower_bound)
+
+        for idx, score in zip(valid_indices, scores):
+            extra_reward_info[idx]["score"] = score
+
+    return extra_reward_info
+
+
+
+def compute_score_hybrid(
+    data_sources,
+    solution_strs,
+    ground_truths,
+    extra_infos=None,
+    batch_size=128,
+    server_url: str = None,
+    use_extract_translation: str = "none",
+    use_bleu_penalty: bool = False,
+    use_length_penalty: bool = False,
+    filter_max_len: int = 1024,
+    penalty_buffer_len: int = 256,
+    short_penalty_buffer_len: int = 0,
+    response_lengths: list[int] = None,
+    en_proxy_reward: bool = False,
+    normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
+    normalize_scale: float = 1.0,
+    score_lower_bound: float = 0.0,
+    use_src_text: bool = True,
+    use_ref_text: bool = True,
+):
+    """
+    batch compute score
+    """
+
+    assert extra_infos is not None
+
+    assert (
+        isinstance(data_sources, Iterable)
+        and isinstance(solution_strs, Iterable)
+        and isinstance(ground_truths, Iterable)
+        and isinstance(extra_infos, Iterable)
+    )
+    assert (
+        len(data_sources)
+        == len(solution_strs)
+        == len(ground_truths)
+        == len(extra_infos)
+    )
+
+    if use_extract_translation == "markdown_optional":
+        solution_dict_list = [extract_markdown_optional(s, return_dict=True) for s in solution_strs]
+    else:
+        raise ValueError(f"Unknown use_extract_translation: {use_extract_translation}")
+    
+    solution_strs = [s["translation"] for s in solution_dict_list]
+    think_marks = [s["is_think"] for s in solution_dict_list]
+
+    # 提取辅助信息
+    src_text = [extra_infos_item["src_text"] for extra_infos_item in extra_infos]
+    tgt_text = [extra_infos_item["tgt_text"] for extra_infos_item in extra_infos]
+    lg = [extra_infos_item["lang_pair"] for extra_infos_item in extra_infos]
+    src_lang = [l.split("-")[0] for l in lg]
+    trg_lang = [l.split("-")[1] for l in lg]
+
+    extra_reward_info = [
+        {
+            "score": score_lower_bound,
+            "mt_score": 0.0,
+            "bleu_penalty": 0.0,
+            "mt_length_penalty": 0.0,
+            "long_resp_length_penalty": 0.0,
+            "short_resp_length_penalty": 0.0,
+            "think_ratio": int(think_mark),
+        }
+        for think_mark in think_marks
+    ]
+
+    # 筛选非None的索引和对应数据
+    valid_indices = [i for i, s in enumerate(solution_strs) if s is not None]
+    valid_src_lang = [src_lang[i] for i in valid_indices]
+    valid_trg_lang = [trg_lang[i] for i in valid_indices]
+    valid_src_text = [src_text[i] for i in valid_indices]
+    valid_trg_text = [tgt_text[i] for i in valid_indices]
+    valid_solution_strs = [solution_strs[i] for i in valid_indices]
+    valid_extra_reward_info = [extra_reward_info[i] for i in valid_indices]
+    valid_think_marks = [think_marks[i] for i in valid_indices]
+
+    if en_proxy_reward:
+        assert "en_text" in extra_infos[0]
+        en_text = [extra_infos_item["en_text"] for extra_infos_item in extra_infos]
+        valid_en_text = [en_text[i] for i in valid_indices]
+    else:
+        valid_en_text = None
+
+    if use_length_penalty:
+        assert response_lengths is not None
+        assert len(response_lengths) == len(solution_strs)
+        valid_response_lengths = [response_lengths[i] for i in valid_indices]
+
+    # 仅对非None条目获取分数
+    if valid_solution_strs:
+        scores = get_tranlation_scores(
+            valid_solution_strs,
+            valid_src_lang,
+            valid_trg_lang,
+            valid_src_text,
+            valid_trg_text,
+            server_url,
+            batch_size,
+            normalize_type=normalize_type,
+            normalize_scale=normalize_scale,
+            use_src_text=use_src_text,
+            use_ref_text=use_ref_text,
+            texts_en=valid_en_text,
+            use_bleu_penalty=use_bleu_penalty,
+            use_length_penalty=use_length_penalty,
+            extra_reward_info=valid_extra_reward_info,
+        )
+
+        # only apply length penalty to think responses
+        think_indices = [i for i, is_think in enumerate(valid_think_marks) if is_think]
+        think_scores = [scores[i] for i in think_indices]
+        think_lengths = [valid_response_lengths[i] for i in think_indices]
+        think_extra_reward = [valid_extra_reward_info[i] for i in think_indices]
+
+        if think_indices:
+            penalized_think_scores = apply_response_length_penalty(
+                think_scores,
+                think_lengths,
+                max_response_len=filter_max_len,
+                penalty_buffer_len=penalty_buffer_len,
+                clip_score=score_lower_bound,
+                min_response_len=short_penalty_buffer_len,
+                extra_reward_info=think_extra_reward,
+            )
+            
+            # 直接更新原始分数列表中对应位置的分数
+            for idx, new_score in zip(think_indices, penalized_think_scores):
+                scores[idx] = new_score
 
         scores = lower_bound_clip(scores, score_lower_bound)
 
