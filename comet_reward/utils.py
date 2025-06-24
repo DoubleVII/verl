@@ -247,6 +247,7 @@ def compute_score(
     filter_max_len: int = 1024,
     penalty_buffer_len: int = 256,
     short_penalty_factor: float = 0,
+    enable_moving_avg_penalty: bool = False,
     response_lengths: list[int] = None,
     en_proxy_reward: bool = False,
     normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
@@ -361,6 +362,7 @@ def compute_score(
             penalty_buffer_len=penalty_buffer_len,
             clip_score=score_lower_bound,
             short_penalty_factor=short_penalty_factor,
+            enable_moving_avg_penalty=enable_moving_avg_penalty,
             extra_reward_info=valid_extra_reward_info,
         )
 
@@ -386,6 +388,7 @@ def compute_score_hybrid(
     filter_max_len: int = 1024,
     penalty_buffer_len: int = 256,
     short_penalty_factor: float = 0,
+    enable_moving_avg_penalty: bool = False,
     response_lengths: list[int] = None,
     en_proxy_reward: bool = False,
     normalize_type: Literal["zero2one", "scale", "none"] = "zero2one",
@@ -505,6 +508,7 @@ def compute_score_hybrid(
                 penalty_buffer_len=penalty_buffer_len,
                 clip_score=score_lower_bound,
                 short_penalty_factor=short_penalty_factor,
+                enable_moving_avg_penalty=enable_moving_avg_penalty,
                 extra_reward_info=think_extra_reward,
             )
             
@@ -987,6 +991,7 @@ def apply_response_length_penalty(
     penalty_buffer_len: int,
     clip_score: float = 0.0, # score for response len >= max_response_len
     short_penalty_factor: float = 0,
+    enable_moving_avg_penalty: bool = False,
     extra_reward_info: list[dict] = None,
 ):
     """
@@ -1017,7 +1022,10 @@ def apply_response_length_penalty(
             ))
             for resp_len, trans_len in zip(response_token_len, translation_token_len)
         ]
-        scores = [s - p for s, p in zip(scores, length_penalty)]
+        avg_penalty = 0
+        if enable_moving_avg_penalty:
+            avg_penalty = sum(length_penalty) / len(length_penalty)
+        scores = [s - p + avg_penalty for s, p in zip(scores, length_penalty)]
 
         if extra_reward_info is not None:
             for i in range(len(scores)):
