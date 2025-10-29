@@ -94,6 +94,7 @@ class AdvantageEstimator(str, Enum):
     REMAX = "remax"
     RLOO = "rloo"
     GRPO_PASSK = "grpo_passk"
+    GRPO_CLASS = "grpo_class"
 
 
 @dataclass
@@ -216,6 +217,29 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def compute_class_ids(data: DataProto) -> list:
+    """Compute class IDs for each response.
+    """
+    class_position = 1
+    responses = data.batch["responses"]
+    class_ids = torch.zeros((responses.size(0),)).long()
+    for idx, token_id in enumerate([18320, 38041]):
+        class_ids[responses[:, class_position] == token_id] = idx
+    return class_ids.tolist()
+
+def updata_response_mask_with_class_adv(data: DataProto, class_mask: torch.Tensor):
+    """Update response mask with class-specific advantage.
+
+    This function modifies the response mask to account for class-specific advantages.
+    Args:
+        data (DataProto): The data containing batched model outputs and inputs.
+        class_mask (torch.Tensor): A tensor indicating the class-specific advantage for each response.
+    """
+    class_position = 1
+    response_mask = data.batch["response_mask"]
+    response_mask[:, class_position] = class_mask
+    data.batch["response_mask"] = response_mask
+
 def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, **kwargs):
     """Compute advantage estimates for policy optimization.
 
@@ -271,6 +295,40 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.GRPO_CLASS:
+        # TODO: test on more adv estimator type
+        grpo_calculation_mask = data.batch["response_mask"]
+        class_ids = compute_class_ids(data)
+        if multi_turn:
+            # If multi-turn, replace the mask with the relevant part of loss_mask
+            response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask
+            grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for GRPO
+        # Call compute_grpo_outcome_advantage with parameters matching its definition
+        advantages, returns, class_mask, adv_class_count= core_algos.compute_grpo_outcome_advantage_with_class_mask(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=grpo_calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            class_ids=class_ids,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            adv_cls_type="mean",
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        data.batch["class_mask"] = class_mask
+        # print("[debug] class_mask", class_mask)
+        # print("[debug] response_mask1", data.batch["response_mask"][:16, 1])
+        # print("[debug] response_mask1", data.batch["response_mask"][16:32, 1])
+        # print("[debug] uids ", data.non_tensor_batch["uid"][:16])
+        # print("[debug] uids ", data.non_tensor_batch["uid"][16:32])
+        # print("[debug] sum1", data.batch["response_mask"][:,1].sum())
+        updata_response_mask_with_class_adv(data, class_mask)
+        # print("[debug] response_mask2", data.batch["response_mask"][:16, 1])
+        # print("[debug] response_mask2", data.batch["response_mask"][16:32, 1])
+        # print("[debug] sum2", data.batch["response_mask"][:,1].sum())
+
+        # raise RuntimeError("debug")
+        print("[Info] adv_class_count", adv_class_count)
+        
     elif adv_estimator == AdvantageEstimator.GRPO_PASSK:
         advantages, returns = core_algos.compute_grpo_passk_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -398,6 +456,7 @@ class RayPPOTrainer:
             AdvantageEstimator.REMAX,
             AdvantageEstimator.RLOO,
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
+            AdvantageEstimator.GRPO_CLASS,
         ]:
             self.use_critic = False
         else:

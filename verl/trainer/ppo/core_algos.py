@@ -165,6 +165,109 @@ def compute_grpo_outcome_advantage(
     return scores, scores
 
 
+
+# NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
+import torch
+import numpy as np
+from collections import defaultdict
+
+def compute_grpo_outcome_advantage_with_class_mask(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    class_ids: list[int],
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: str = True,
+    adv_cls_type: str = "mean"
+):
+    """
+    Compute advantage for GRPO with additional class dominance marking.
+    Args:
+        token_level_rewards: `(torch.Tensor)` shape (bs, response_length)
+        response_mask: `(torch.Tensor)` shape (bs, response_length)
+        index: `(np.ndarray)` group indices for each sample
+        class_ids: `(list[int])` class IDs for each sample
+        epsilon: `(float)` numerical stability term
+        norm_adv_by_std_in_grpo: `(str)` whether to normalize advantage by std
+        adv_cls_type: `(str)` method to compute class dominance ("mean" or "max")
+    
+    Returns:
+        advantages: `(torch.Tensor)` shape (bs, response_length)
+        returns: `(torch.Tensor)` shape (bs, response_length)
+        class_mask: `(torch.Tensor)` bool tensor shape (bs,) marking dominant classes
+    """
+    scores = token_level_rewards.sum(dim=-1)
+    bsz = scores.shape[0]
+    
+    # 1. Prepare dictionaries for group calculations
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+    id2class_scores = defaultdict(lambda: defaultdict(list))
+    id2indices = defaultdict(list)
+    adv_class_count = defaultdict(int)
+    
+    # 2. Populate dictionaries with scores and class information
+    for i in range(bsz):
+        group_id = index[i]
+        class_id = class_ids[i]
+        id2score[group_id].append(scores[i])
+        id2class_scores[group_id][class_id].append(scores[i].item())
+        id2indices[group_id].append(i)
+    
+    # 3. Initialize class mask tensor
+    class_mask = torch.zeros(bsz, dtype=torch.bool, device=response_mask.device)
+    
+    # 4. Calculate dominant classes per group
+    for group_id, class_data in id2class_scores.items():
+        # Skip if group has no data
+        if not class_data:
+            continue
+        
+        # Calculate class representatives
+        class_representatives = {}
+        for class_id, scores_list in class_data.items():
+            scores_tensor = torch.tensor(scores_list)
+            if adv_cls_type == "mean":
+                class_representatives[class_id] = torch.mean(scores_tensor)
+            elif adv_cls_type == "max":
+                class_representatives[class_id] = torch.max(scores_tensor)
+            else:
+                raise ValueError(f"Unknown adv_cls_type: {adv_cls_type}")
+        
+        # Find dominant class(es) - classes with max representative score
+        max_val = max(class_representatives.values())
+        dominant_classes = {c for c, v in class_representatives.items() if v == max_val}
+        
+        # Mark samples in dominant classes
+        for i in id2indices[group_id]:
+            if class_ids[i] in dominant_classes:
+                class_mask[i] = True
+                adv_class_count[class_ids[i]] += 1
+    
+    # 5. Calculate group statistics and normalize scores
+    for group_id, score_list in id2score.items():
+        if len(score_list) == 1:
+            id2mean[group_id] = torch.tensor(0.0)
+            id2std[group_id] = torch.tensor(1.0)
+        elif len(score_list) > 1:
+            scores_tensor = torch.stack(score_list)
+            id2mean[group_id] = torch.mean(scores_tensor)
+            id2std[group_id] = torch.std(scores_tensor)
+    
+    # 6. Apply normalization to scores
+    with torch.no_grad():
+        for i in range(bsz):
+            group_id = index[i]
+            if norm_adv_by_std_in_grpo:
+                scores[i] = (scores[i] - id2mean[group_id]) / (id2std[group_id] + epsilon)
+            else:
+                scores[i] = scores[i] - id2mean[group_id]
+        scores = scores.unsqueeze(-1) * response_mask
+    
+    return scores, scores, class_mask, adv_class_count
+
+
 def compute_grpo_passk_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
