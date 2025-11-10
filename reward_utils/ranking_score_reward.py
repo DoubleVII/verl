@@ -57,6 +57,10 @@ def validate_ranking(test_str: str, ref_str: str) -> bool:
             return False
         ref_tiers = parse_order(ref_str)
         ref_count = sum(len(tiers) for tiers in ref_tiers)
+
+        if len(test_str) != (ref_count-1)*3 + ref_count:
+            return False
+
         test_tiers = parse_order(test_str)
         test_count = sum(len(tiers) for tiers in test_tiers)
         if test_count != ref_count:
