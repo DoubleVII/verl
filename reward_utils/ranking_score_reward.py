@@ -24,21 +24,24 @@ def pair_relation(tiers, x, y):
         return 0
 
 def compare_orderings(test_str, ref_str):
-    test_tiers = parse_order(test_str)
-    ref_tiers = parse_order(ref_str)
-    items = sorted(set().union(*test_tiers))
-    
-    total = 0
-    score = 0
-    for x, y in combinations(items, 2):
-        r_ref = pair_relation(ref_tiers, x, y)
-        r_test = pair_relation(test_tiers, x, y)
-        total += 1
-        if r_ref == r_test:
-            score += 1
-        elif 0 in (r_ref, r_test):
-            score += 0 # we treat ties as incorrect
-    return score / total
+    try:
+        test_tiers = parse_order(test_str)
+        ref_tiers = parse_order(ref_str)
+        items = sorted(set().union(*test_tiers))
+        
+        total = 0
+        score = 0
+        for x, y in combinations(items, 2):
+            r_ref = pair_relation(ref_tiers, x, y)
+            r_test = pair_relation(test_tiers, x, y)
+            total += 1
+            if r_ref == r_test:
+                score += 1
+            elif 0 in (r_ref, r_test):
+                score += 0 # we treat ties as incorrect
+        return score / total
+    except Exception:
+        return 0
 
 
 
@@ -78,6 +81,9 @@ def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
 
     pred_ranking_str = _extract_ranking(solution_str)
     if not validate_ranking(pred_ranking_str, ground_truth):
-        return 0
+        return {"score": 0, "valid_ranking": 0}
+
+    if solution_str.count(pred_ranking_str) != 1:
+        return {"score": 0, "valid_ranking": 0}
     
-    return compare_orderings(pred_ranking_str, ground_truth)
+    return {"score": compare_orderings(pred_ranking_str, ground_truth), "valid_ranking": 1}
