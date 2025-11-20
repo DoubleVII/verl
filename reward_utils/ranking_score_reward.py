@@ -146,17 +146,8 @@ def ranking_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
 
     if len(cot_text) == 0:
         return {"score": 0, "valid_answer": 0}
-
-    if not validate_ranking(pred_ranking_str, ground_truth):
-        return {"score": 0, "valid_answer": 0}
-
-    if solution_str.count(pred_ranking_str) != 1:  # prohibit repeat output
-        return {"score": 0, "valid_answer": 0}
-
-    return {
-        "score": compare_orderings(pred_ranking_str, ground_truth),
-        "valid_answer": 1,
-    }
+    
+    return ranking_reward_fn_no_cot(data_source, solution_str, ground_truth, extra_info)
 
 
 def _score_to_rank(d) -> str:
@@ -244,25 +235,17 @@ def _parse_score_text(score_text: str) -> Optional[dict]:
         return None
 
 
-def ranking_score_reward_fn(
+def ranking_score_reward_fn_no_cot(
     data_source, solution_str, ground_truth: Union[str, dict], extra_info=None
 ):
     if isinstance(ground_truth, str):
         ground_truth = json.loads(ground_truth)
     reward_out = {"score": 0, "valid_answer": 0, "ranking_reward": 0, "score_reward": 0}
-    extract_out = _extract_ranking_score(solution_str)
-    if extract_out is None:
-        return reward_out
-    cot_text, score_text, ranking_text, score_header, ranking_header = (
-        extract_out["cot_text"],
-        extract_out["score_text"],
-        extract_out["ranking_text"],
-        extract_out["score_header"],
-        extract_out["ranking_header"],
-    )
 
-    if len(cot_text) == 0:
+    solution_str = solution_str.strip()
+    if solution_str.count("\n") != 1:
         return reward_out
+    ranking_text, score_text = solution_str.split("\n")
 
     pred_score_dict = _parse_score_text(score_text)
     if pred_score_dict is None:
@@ -292,3 +275,28 @@ def ranking_score_reward_fn(
     reward_out["ranking_reward"] = ranking_reward
     reward_out["score_reward"] = score_reward
     return reward_out
+
+
+def ranking_score_reward_fn(
+    data_source, solution_str, ground_truth: Union[str, dict], extra_info=None
+):
+    reward_out = {"score": 0, "valid_answer": 0, "ranking_reward": 0, "score_reward": 0}
+    extract_out = _extract_ranking_score(solution_str)
+    if extract_out is None:
+        return reward_out
+    
+    cot_text, score_text, ranking_text, score_header, ranking_header = (
+        extract_out["cot_text"],
+        extract_out["score_text"],
+        extract_out["ranking_text"],
+        extract_out["score_header"],
+        extract_out["ranking_header"],
+    )
+
+    if len(cot_text) == 0:
+        return reward_out
+    
+    no_cot_solution_str = f"{ranking_text}\n{score_text}"
+    return ranking_score_reward_fn_no_cot(
+        data_source, no_cot_solution_str, ground_truth, extra_info
+    )
