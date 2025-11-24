@@ -21,6 +21,7 @@ from vllm import LLM, SamplingParams
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import register, Dispatch
+from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_extern_type
 
 
@@ -31,13 +32,19 @@ class VLLMRewardModelWorker(Worker):
         
         # Initialize vLLM engine
         model_path = config.model.path
+        # Check if model path is HDFS path and copy to local if needed
+        local_model_path = copy_to_local(
+            src=model_path,
+            cache_dir=config.get("cache_dir", None),
+            use_shm=config.get("use_shm", False)
+        )
         tensor_parallel_size = config.get("tensor_parallel_size", 1)
         # Default to 1 GPU if not specified, but typically this should match resource pool
         if not torch.cuda.is_available():
              raise RuntimeError("vLLM requires CUDA to run.")
 
         self.llm = LLM(
-            model=model_path,
+            model=local_model_path,
             tensor_parallel_size=tensor_parallel_size,
             trust_remote_code=config.model.get("trust_remote_code", False),
             dtype=config.model.get("dtype", "auto"),
