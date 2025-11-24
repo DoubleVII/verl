@@ -15,6 +15,7 @@
 vLLM Reward Model Worker
 """
 import os
+import inspect
 import torch
 from vllm import LLM, SamplingParams
 
@@ -23,12 +24,14 @@ from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import register, Dispatch
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import load_extern_type
+from verl.third_party.vllm import VLLM_SLEEP_LEVEL
 
 
 class VLLMRewardModelWorker(Worker):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.rollout_config = getattr(config, "rollout", None)
         
         # Initialize vLLM engine
         model_path = config.model.path
@@ -43,6 +46,10 @@ class VLLMRewardModelWorker(Worker):
         if not torch.cuda.is_available():
              raise RuntimeError("vLLM requires CUDA to run.")
 
+        enable_sleep_mode = False
+        if self.rollout_config is not None:
+            enable_sleep_mode = bool(getattr(self.rollout_config, "free_cache_engine", False))
+
         self.llm = LLM(
             model=local_model_path,
             tensor_parallel_size=tensor_parallel_size,
@@ -50,7 +57,15 @@ class VLLMRewardModelWorker(Worker):
             dtype=config.model.get("dtype", "auto"),
             gpu_memory_utilization=config.get("gpu_memory_utilization", 0.9),
             enforce_eager=config.get("enforce_eager", False),
+            enable_sleep_mode=enable_sleep_mode,
         )
+
+        if self.rollout_config is not None:
+            layered_summon = bool(getattr(self.rollout_config, "layered_summon", False))
+            expert_parallel_size = int(getattr(self.rollout_config, "expert_parallel_size", 0))
+            self.sleep_level = 1 if (layered_summon or expert_parallel_size > 1) else VLLM_SLEEP_LEVEL
+        else:
+            self.sleep_level = VLLM_SLEEP_LEVEL
 
         # Load custom processor if specified
         self.processor = None
@@ -69,6 +84,22 @@ class VLLMRewardModelWorker(Worker):
     def init_model(self):
         # vLLM model is initialized in __init__
         pass
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def resume(self, tags: list[str]):
+        if self.rollout_config is None or not getattr(self.rollout_config, "free_cache_engine", False):
+            return
+        if "tags" in inspect.signature(self.llm.wake_up).parameters:
+            self.llm.wake_up(tags=tags)
+        else:
+            self.llm.wake_up()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def release(self):
+        self.llm.reset_prefix_cache()
+        if self.rollout_config is None or not getattr(self.rollout_config, "free_cache_engine", False):
+            return
+        self.llm.sleep(level=self.sleep_level)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_rm_score(self, data: DataProto):
@@ -96,7 +127,17 @@ class VLLMRewardModelWorker(Worker):
             raise NotImplementedError("Default prompt construction not implemented. Please provide a custom_processor.")
 
         # 2. Generate
+        if self.rollout_config is not None and getattr(self.rollout_config, "free_cache_engine", False):
+            if "tags" in inspect.signature(self.llm.wake_up).parameters:
+                self.llm.wake_up(tags=["weights"])  # 奖励模型通常权重静态
+            else:
+                self.llm.wake_up()
+
         outputs = self.llm.generate(prompts, self.sampling_params)
+
+        if self.rollout_config is not None and getattr(self.rollout_config, "free_cache_engine", False):
+            self.llm.reset_prefix_cache()
+            self.llm.sleep(level=self.sleep_level)
 
         # 3. Extract rewards
         if self.processor and hasattr(self.processor, "process_output"):
