@@ -209,8 +209,8 @@ class TaskRunner:
                     from verl.workers.fsdp_workers import RewardModelWorker
                 elif config.reward_model.strategy == "megatron":
                     from verl.workers.megatron_workers import RewardModelWorker
-                elif config.reward_model.strategy == "vllm":
-                    from verl.workers.reward_model.vllm_worker import VLLMRewardModelWorker as RewardModelWorker
+                elif config.reward_model.strategy == "GenRM":
+                    from verl.workers.fsdp_workers import GenerativeRewardModelWorker as RewardModelWorker
                 else:
                     raise NotImplementedError
             elif use_legacy_worker_impl == "disable":

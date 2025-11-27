@@ -78,14 +78,14 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
-from verl.utils.import_utils import import_external_libs
+from verl.utils.import_utils import import_external_libs, load_extern_type
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import compute_position_id_with_mask, convert_weight_keys
 from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.ray_utils import get_event_loop
-from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
+from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig, FSDPActorConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
@@ -188,6 +188,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
         self.use_orig_params = self.config.actor.fsdp_config.get("use_orig_params", False)
+
+        self._disable_optim = kwargs.get("disable_optim", False)
 
         # TODO(haibin.lin):
         # As of now the type of config is DictConfig, if we assign config.profiler with ProfilerConfig,
@@ -578,7 +580,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         from torch.distributed.device_mesh import init_device_mesh
 
         # 1. parse rollout and huggingface model config
-        rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
+        rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout, dataclass_type=RolloutConfig)
         model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model, dataclass_type=HFModelConfig)
         self.model_config = model_config
 
@@ -777,7 +779,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ) = self._build_model_optimizer(
                 model_path=local_path,
                 fsdp_config=fsdp_config,
-                optim_config=optim_config,
+                optim_config=optim_config if not self._disable_optim else None,
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
                 use_fused_kernels=use_fused_kernels,
@@ -1919,6 +1921,193 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         output = output.to("cpu")
         return output
 
+
+class GenerativeRewardModelWorker(ActorRolloutRefWorker):
+    def __init__(self, config: DictConfig, **kwargs):
+
+        actor_config = kwargs.get("actor_config", None)
+
+        input_tokenizer_path = config.model.input_tokenizer
+        tokenizer_path = config.model.path
+
+        # Avoid mutating the incoming OmegaConf config. If 'actor' is missing,
+        # create a working copy that includes a default FSDP actor config.
+        if OmegaConf.select(config, "actor") is None:
+            actor_cfg_dict = asdict(FSDPActorConfig(use_dynamic_bsz=True))
+            merged_cfg = OmegaConf.merge(OmegaConf.create({"actor": actor_cfg_dict}), config)
+        else:
+            merged_cfg = config
+
+        merged_cfg.actor.strategy = "fsdp2"
+
+        # Ensure rollout has structured defaults so missing keys like
+        # 'log_prob_micro_batch_size' exist and are initialized to None.
+        rollout_defaults = asdict(RolloutConfig())
+        # # Ensure profiler is a dict-like config (not None) to avoid `.get` on None
+        if "profiler" in rollout_defaults:
+            del rollout_defaults["profiler"]
+        merged_cfg = OmegaConf.merge(OmegaConf.create({"rollout": rollout_defaults}), merged_cfg)
+
+        # Move model.fsdp_config to actor.fsdp_config, then drop it from model.
+        # Also drop model.input_tokenizer to match HFModelConfig schema.
+        model_fsdp_cfg = OmegaConf.select(merged_cfg, "model.fsdp_config")
+        with open_dict(merged_cfg):
+            # initialize actor section if still missing (defensive)
+            if OmegaConf.select(merged_cfg, "actor") is None:
+                merged_cfg.actor = asdict(FSDPActorConfig(use_dynamic_bsz=True))
+            # set actor.fsdp_config from model.fsdp_config when present
+            if model_fsdp_cfg is not None:
+                merged_cfg.actor.fsdp_config = model_fsdp_cfg
+            
+            del merged_cfg.actor["model_config"]
+            merged_cfg.actor = actor_config.actor
+            # merged_cfg.actor.fsdp_config = actor_config.actor.fsdp_config
+            
+
+            if "profiler" in merged_cfg.actor:
+                del merged_cfg.actor["profiler"]
+        # safely remove unsupported model keys
+        if OmegaConf.select(merged_cfg, "model") is not None:
+            with open_dict(merged_cfg.model):
+                if "fsdp_config" in merged_cfg.model:
+                    del merged_cfg.model["fsdp_config"]
+                if "input_tokenizer" in merged_cfg.model:
+                    del merged_cfg.model["input_tokenizer"]
+
+        super().__init__(merged_cfg, role="actor_rollout", disable_optim=True, **kwargs)
+
+        self.init_tokenizer_processor(tokenizer_path, input_tokenizer_path)
+
+
+    def init_tokenizer_processor(self, tokenizer_path: str, input_tokenizer_path: Optional[str] = None):
+        use_shm = self.config.model.get("use_shm", False)
+        local_path = copy_to_local(tokenizer_path, use_shm=use_shm)
+        trust_remote_code = self.config.model.get("trust_remote_code", False)
+
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        if input_tokenizer_path is None:
+            self.input_tokenizer = self.tokenizer
+        else:
+            input_tokenizer_local_path = copy_to_local(input_tokenizer_path, use_shm=use_shm)
+            self.input_tokenizer = hf_tokenizer(
+                input_tokenizer_local_path, trust_remote_code=trust_remote_code
+            )
+        
+        # Load custom processor if specified
+        if self.config.get("custom_processor", None):
+            processor_cls = load_extern_type(self.config.custom_processor.path, self.config.custom_processor.name)
+            self.custom_processor = processor_cls(config=self.config, tokenizer=self.tokenizer, input_tokenizer=self.input_tokenizer)
+
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
+    @DistProfiler.annotate(color="brown", role="reward_generate")
+    def compute_rm_score(self, data: DataProto):
+        # Support all hardwares
+        data = data.to(get_device_id())
+
+        meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id
+            if self.generation_config is not None
+            else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id
+            if self.generation_config is not None
+            else self.tokenizer.pad_token_id,
+        }
+        data.meta_info.update(meta_info)
+
+        # 1. Construct prompts
+        if self.custom_processor and hasattr(self.custom_processor, "process_input"):
+            prompts = self.custom_processor.process_input(data)
+        else:
+            # Default prompt construction: concatenate prompt and response
+            # This assumes data.batch contains 'input_ids' and 'responses' or similar
+            # For simplicity, let's assume we decode input_ids to text if no processor
+            # But typically vLLM expects text prompts or token ids.
+            # Let's try to use the tokenizer from vLLM to decode if needed, or expect text in data
+            # For now, let's assume data has 'prompts' and 'responses' in text form in non_tensor_batch
+            # or we decode from tensor batch.
+            # A safer default might be to expect 'full_text' or similar.
+            # Given the user requirement "User will handle prompt construction", 
+            # we should probably rely on the processor or a simple default.
+            
+            # Let's assume data.batch['input_ids'] contains the full sequence (prompt + response)
+            # We might need to decode it to text for vLLM if we want to re-process, 
+            # but vLLM can take token_ids.
+            # However, for reward models, we usually input the full text.
+            
+            # Placeholder for default logic:
+            raise NotImplementedError("Default prompt construction not implemented. Please provide a custom_processor.")
+
+
+        timing_generate = {}
+
+        timing_generate = {}
+        if self._is_actor:  # For rollout only, we do not switch context.
+            loop = get_event_loop()
+            loop.run_until_complete(self.rollout_mode())
+            log_gpu_memory_usage("After switch to rollout mode", logger=logger)
+
+        # 2. Generate
+        with simple_timer("generate_rewards", timing_generate), self.rollout.update_sampling_params(detokenize=True):
+            outputs = self.rollout.inference_engine.generate(
+                prompts=prompts,
+                sampling_params=self.rollout.sampling_params,
+                use_tqdm=False,
+            )
+        
+        # 3. Extract rewards
+        if self.custom_processor and hasattr(self.custom_processor, "process_output"):
+            reward_tensor = self.custom_processor.process_output(outputs, data)
+            if not isinstance(reward_tensor, torch.Tensor):
+                reward_tensor = torch.tensor(reward_tensor, dtype=torch.float32)
+        else:
+            raise NotImplementedError("Default reward extraction not implemented. Please provide a custom_processor.")
+
+        if self._is_actor:
+            loop.run_until_complete(self.trainer_mode())
+            log_gpu_memory_usage("After switch to trainer mode", logger=logger)
+
+        # We calculate the average timing across all ranks
+        # to make sure meta_info["timing"] is the same
+        timing_generate_topk_ratio, timing_generate_min, timing_generate_max = topk_reduce_ratio_min_max(
+            timing_generate["generate_rewards"]
+        )
+        timing_generate = reduce_timing(timing_generate)
+        timing_generate.update(
+            {
+                "reward_timing/max": timing_generate_max,
+                "reward_timing/min": timing_generate_min,
+                "reward_timing/topk_ratio": timing_generate_topk_ratio,
+            }
+        )
+
+        token_level_scores = self._expand_to_token_level(data, reward_tensor)
+        # Note that this is only the scores, may not be the final rewards used to train RL
+        output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
+        output = output.to("cpu")
+
+        # clear kv cache
+        get_torch_device().empty_cache()
+        return output
+
+    def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
+        batch_size = data.batch.batch_size[0]
+        # expand as token_level_reward
+        attention_mask = data.batch["attention_mask"]
+        position_ids = data.batch["position_ids"]
+        response_length = data.batch["responses"].shape[-1]
+        if position_ids.dim() == 3:  # qwen2vl mrope [bs, 3, seq_len]
+            position_ids = position_ids[:, 0, :]
+        eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
+        token_level_scores = torch.zeros_like(attention_mask, dtype=scores.dtype)  # (bsz, seqlen)
+        token_level_scores[torch.arange(batch_size), eos_mask_idx] = scores.to(device=token_level_scores.device)
+
+        # select the response part
+        token_level_scores = token_level_scores[:, -response_length:]
+
+        return token_level_scores
+
+    
 
 # ================================= Async related workers =================================
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
