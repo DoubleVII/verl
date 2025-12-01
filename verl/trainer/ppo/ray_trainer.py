@@ -917,35 +917,93 @@ class RayPPOTrainer:
             if self.use_rm:
                 self.rm_wg.stop_profile()
 
-    def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen", keep_minibatch=False):
+    def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen", keep_minibatch=False, keep_group=False):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
         attention_mask = batch.batch["attention_mask"]
         batch_size = attention_mask.shape[0]
         global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1)  # (train_batch_size,)
         global_seqlen_lst = calculate_workload(global_seqlen_lst)
-        world_size = self.actor_rollout_wg.world_size
-        if keep_minibatch:
-            # Decouple the DP balancing and mini-batching.
-            minibatch_size = self.config.actor_rollout_ref.actor.get("ppo_mini_batch_size")
-            minibatch_num = len(global_seqlen_lst) // minibatch_size
-            global_partition_lst = [[] for _ in range(world_size)]
-            for i in range(minibatch_num):
-                rearrange_minibatch_lst = get_seqlen_balanced_partitions(
-                    global_seqlen_lst[i * minibatch_size : (i + 1) * minibatch_size],
-                    k_partitions=world_size,
-                    equal_size=True,
-                )
-                for j, part in enumerate(rearrange_minibatch_lst):
-                    global_partition_lst[j].extend([x + minibatch_size * i for x in part])
+        if keep_group and not keep_minibatch:
+            try:
+                dp_rank_mapping = self.rm_wg._query_dispatch_info("rollout")
+                dp_size = max(dp_rank_mapping) + 1
+            except Exception:
+                dp_rank_mapping = self.rm_wg._query_dispatch_info("reward")
+                dp_size = max(dp_rank_mapping) + 1
+
+            uids = batch.non_tensor_batch.get("uid")
+            if uids is None:
+                uids = np.array([str(i) for i in range(batch_size)], dtype=object)
+
+            uid_to_indices = {}
+            for i in range(batch_size):
+                uid = uids[i]
+                lst = uid_to_indices.get(uid)
+                if lst is None:
+                    uid_to_indices[uid] = [i]
+                else:
+                    lst.append(i)
+
+            groups = []
+            for uid, idxs in uid_to_indices.items():
+                work = int(torch.tensor([global_seqlen_lst[j] for j in idxs]).sum().item())
+                groups.append((uid, idxs, work))
+            groups.sort(key=lambda x: (x[2], x[1][0]))
+            groups = groups[::-1]
+
+            assert batch_size % dp_size == 0
+            chunk_size = batch_size // dp_size
+            partitions = [[] for _ in range(dp_size)]
+            part_work = [0 for _ in range(dp_size)]
+            part_remaining = [chunk_size for _ in range(dp_size)]
+
+            for uid, idxs, work in groups:
+                placed = False
+                order = sorted(range(dp_size), key=lambda k: (part_work[k], -part_remaining[k]))
+                for k in order:
+                    if part_remaining[k] >= len(idxs):
+                        partitions[k].append((uid, idxs, work))
+                        part_work[k] += work
+                        part_remaining[k] -= len(idxs)
+                        placed = True
+                        break
+                if not placed:
+                    k = max(range(dp_size), key=lambda x: part_remaining[x])
+                    partitions[k].append((uid, idxs, work))
+                    part_work[k] += work
+                    part_remaining[k] -= len(idxs)
+
+            global_partition_lst = []
+            for idx, partition in enumerate(partitions):
+                partition.sort(key=lambda x: (x[2], x[1][0]))
+                ordered = partition[::2] + partition[1::2][::-1]
+                ordered_partition = []
+                for _, idxs, _ in ordered:
+                    ordered_partition.extend(idxs)
+                global_partition_lst.append(ordered_partition)
         else:
-            global_partition_lst = get_seqlen_balanced_partitions(
-                global_seqlen_lst, k_partitions=world_size, equal_size=True
-            )
-        # Place smaller micro-batches at both ends to reduce the bubbles in pipeline parallel.
-        for idx, partition in enumerate(global_partition_lst):
-            partition.sort(key=lambda x: (global_seqlen_lst[x], x))
-            ordered_partition = partition[::2] + partition[1::2][::-1]
-            global_partition_lst[idx] = ordered_partition
+            world_size = self.actor_rollout_wg.world_size
+            if keep_minibatch:
+                minibatch_size = self.config.actor_rollout_ref.actor.get("ppo_mini_batch_size")
+                minibatch_num = len(global_seqlen_lst) // minibatch_size
+                global_partition_lst = [[] for _ in range(world_size)]
+                for i in range(minibatch_num):
+                    rearrange_minibatch_lst = get_seqlen_balanced_partitions(
+                        global_seqlen_lst[i * minibatch_size : (i + 1) * minibatch_size],
+                        k_partitions=world_size,
+                        equal_size=True,
+                    )
+                    for j, part in enumerate(rearrange_minibatch_lst):
+                        global_partition_lst[j].extend([x + minibatch_size * i for x in part])
+            else:
+                global_partition_lst = get_seqlen_balanced_partitions(
+                    global_seqlen_lst, k_partitions=world_size, equal_size=True
+                )
+        if not keep_group:
+            for idx, partition in enumerate(global_partition_lst):
+                partition.sort(key=lambda x: (global_seqlen_lst[x], x))
+                ordered_partition = partition[::2] + partition[1::2][::-1]
+                global_partition_lst[idx] = ordered_partition
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
         global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
         batch.reorder(global_idx)
@@ -1143,7 +1201,7 @@ class RayPPOTrainer:
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
+                        self._balance_batch(batch, metrics=metrics, keep_group=self.config.reward_model.get("keep_group", False))
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
