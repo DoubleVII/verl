@@ -1390,6 +1390,32 @@ def compute_value_loss(
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
     return vf_loss, vf_clipfrac
 
+def compute_policy_sft_loss(
+    log_prob,
+    advantages,
+    response_mask,
+    loss_agg_mode: str = "token-mean",
+):
+    """
+    Args:
+        log_prob: `(torch.Tensor)`
+            shape: (bs, response_length)
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        response_mask: `(torch.Tensor)`
+            shape: (bs, response_length)
+        loss_agg_mode: (str) see `agg_loss`
+
+    Returns:
+        sft_loss: `a scalar torch.Tensor`
+    """
+
+    positive_advantages = torch.clamp(advantages, 0, None)
+    valid_advantage_mask = response_mask & (advantages > 0)
+    sft_loss = -agg_loss(loss_mat=positive_advantages * log_prob, loss_mask=valid_advantage_mask, loss_agg_mode=loss_agg_mode)
+
+    return sft_loss
+
 
 def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_penalty) -> torch.FloatTensor:
     """Compute KL divergence given logprob and ref_logprob. Optionally using straight through to bind k2 on other
