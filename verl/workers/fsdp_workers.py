@@ -2016,13 +2016,13 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
         }
         data.meta_info.update(meta_info)
 
-        uids = data.non_tensor_batch.get("uid", None)
-        if uids is not None:
-            uid_counts = {}
-            for u in uids:
-                uid_counts[u] = uid_counts.get(u, 0) + 1
-            debug_str = ", ".join([f"{str(k)}:{v}" for k, v in uid_counts.items()])
-            print(f"[debug] uid_counts [{len(uid_counts)}]: {debug_str}")
+        # uids = data.non_tensor_batch.get("uid", None)
+        # if uids is not None:
+        #     uid_counts = {}
+        #     for u in uids:
+        #         uid_counts[u] = uid_counts.get(u, 0) + 1
+        #     debug_str = ", ".join([f"{str(k)}:{v}" for k, v in uid_counts.items()])
+        #     print(f"[debug] uid_counts [{len(uid_counts)}]: {debug_str}")
 
         if not self.custom_processor or not hasattr(self.custom_processor, "compute_scores"):
             raise NotImplementedError("Please provide a custom_processor with compute_scores method.")
