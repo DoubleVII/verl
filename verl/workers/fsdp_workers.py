@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import warnings
+import functools
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -2015,28 +2016,16 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
         }
         data.meta_info.update(meta_info)
 
-        # 1. Construct prompts
-        if self.custom_processor and hasattr(self.custom_processor, "process_input"):
-            prompts = self.custom_processor.process_input(data)
-        else:
-            # Default prompt construction: concatenate prompt and response
-            # This assumes data.batch contains 'input_ids' and 'responses' or similar
-            # For simplicity, let's assume we decode input_ids to text if no processor
-            # But typically vLLM expects text prompts or token ids.
-            # Let's try to use the tokenizer from vLLM to decode if needed, or expect text in data
-            # For now, let's assume data has 'prompts' and 'responses' in text form in non_tensor_batch
-            # or we decode from tensor batch.
-            # A safer default might be to expect 'full_text' or similar.
-            # Given the user requirement "User will handle prompt construction", 
-            # we should probably rely on the processor or a simple default.
-            
-            # Let's assume data.batch['input_ids'] contains the full sequence (prompt + response)
-            # We might need to decode it to text for vLLM if we want to re-process, 
-            # but vLLM can take token_ids.
-            # However, for reward models, we usually input the full text.
-            
-            # Placeholder for default logic:
-            raise NotImplementedError("Default prompt construction not implemented. Please provide a custom_processor.")
+        uids = data.non_tensor_batch.get("uid", None)
+        if uids is not None:
+            uid_counts = {}
+            for u in uids:
+                uid_counts[u] = uid_counts.get(u, 0) + 1
+            debug_str = ", ".join([f"{str(k)}:{v}" for k, v in uid_counts.items()])
+            print(f"[debug] uid_counts [{len(uid_counts)}]: {debug_str}")
+
+        if not self.custom_processor or not hasattr(self.custom_processor, "compute_scores"):
+            raise NotImplementedError("Please provide a custom_processor with compute_scores method.")
 
 
         timing_generate = {}
@@ -2047,21 +2036,20 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
             loop.run_until_complete(self.rollout_mode())
             log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
-        # 2. Generate
         with simple_timer("generate_rewards", timing_generate), self.rollout.update_sampling_params(detokenize=True):
-            outputs = self.rollout.inference_engine.generate(
-                prompts=prompts,
+            generate_fn = functools.partial(
+                self.rollout.inference_engine.generate,
                 sampling_params=self.rollout.sampling_params,
                 use_tqdm=False,
             )
-        
-        # 3. Extract rewards
-        if self.custom_processor and hasattr(self.custom_processor, "process_output"):
-            reward_tensor = self.custom_processor.process_output(outputs, data)
-            if not isinstance(reward_tensor, torch.Tensor):
-                reward_tensor = torch.tensor(reward_tensor, dtype=torch.float32)
+            reward_scores = self.custom_processor.compute_scores(
+                data,
+                generate_fn,
+            )
+        if not isinstance(reward_scores, torch.Tensor):
+            reward_tensor = torch.tensor(reward_scores, dtype=torch.float32)
         else:
-            raise NotImplementedError("Default reward extraction not implemented. Please provide a custom_processor.")
+            reward_tensor = reward_scores
 
         if self._is_actor:
             loop.run_until_complete(self.trainer_mode())
