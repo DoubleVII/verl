@@ -480,7 +480,9 @@ class DataParallelPPOActor(BasePPOActor):
                             loss_agg_mode=loss_agg_mode,
                         )
                         policy_loss = policy_loss + sft_loss * sft_coeff
-                        metrics["actor/sft_loss"] = sft_loss.detach().item()
+                        micro_batch_metrics["actor/sft_loss"] = sft_loss.detach().item() * loss_scale_factor
+
+
 
                     if self.config.use_kl_loss:
                         ref_log_prob = model_inputs["ref_log_prob"]
