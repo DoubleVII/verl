@@ -2132,3 +2132,128 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     ) -> list[int]:
         ret = await self.rollout.generate(prompt_ids, sampling_params, request_id, image_data=image_data)
         return ret
+
+
+class SeedXRewardModelWorker(RewardModelWorker):
+    def __init__(self, config: DictConfig, **kwargs):
+        super().__init__(config)
+        self.init_tokenizer_processor(config.model.path, config.model.input_tokenizer)
+
+    def init_tokenizer_processor(self, tokenizer_path: str, input_tokenizer_path: Optional[str] = None):
+        use_shm = self.config.model.get("use_shm", False)
+        local_path = copy_to_local(tokenizer_path, use_shm=use_shm)
+        trust_remote_code = self.config.model.get("trust_remote_code", False)
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        if input_tokenizer_path is None:
+            self.input_tokenizer = self.tokenizer
+        else:
+            input_tokenizer_local_path = copy_to_local(input_tokenizer_path, use_shm=use_shm)
+            self.input_tokenizer = hf_tokenizer(
+                input_tokenizer_local_path, trust_remote_code=trust_remote_code
+            )
+        if self.config.get("custom_processor", None):
+            processor_cls = load_extern_type(self.config.custom_processor.path, self.config.custom_processor.name)
+            self.custom_processor = processor_cls(
+                config=self.config, tokenizer=self.tokenizer, input_tokenizer=self.input_tokenizer
+            )
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        import_external_libs(self.config.model.get("external_lib", None))
+        self.rm_module = self._build_seedx_model(self.config)
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.rm_module)
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
+    @DistProfiler.annotate(color="brown")
+    def compute_rm_score(self, data: DataProto):
+        data = data.to(get_device_id())
+        if not hasattr(self, "custom_processor") or not hasattr(self.custom_processor, "compute_scores"):
+            raise NotImplementedError("Please provide a custom_processor with compute_scores method.")
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.rm_module)
+        scores = self.custom_processor.compute_scores(data, self._seedx_score)
+        if not isinstance(scores, torch.Tensor):
+            scores = torch.tensor(scores, dtype=torch.float32)
+        token_level_scores = self._expand_to_token_level(data, scores)
+        output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
+        output = output.to("cpu")
+        get_torch_device().empty_cache()
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.rm_module)
+        return output
+
+    def _build_seedx_model(self, config):
+        from torch.distributed.fsdp import CPUOffload
+        from transformers import AutoConfig, MistralForCausalLM
+        use_shm = config.model.get("use_shm", False)
+        local_path = copy_to_local(config.model.path, use_shm=use_shm)
+        trust_remote_code = config.model.get("trust_remote_code", False)
+        model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        init_context = get_init_weight_context_manager(
+            use_meta_tensor=not getattr(model_config, "tie_word_embeddings", False), mesh=self.device_mesh
+        )
+        with init_context(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            module = MistralForCausalLM(model_config)
+            module.lm_head = torch.nn.Linear(model_config.hidden_size, 1, bias=False)
+            apply_monkey_patch(
+                model=module,
+                use_remove_padding=config.model.get("use_remove_padding", False),
+                ulysses_sp_size=self.ulysses_sequence_parallel_size,
+            )
+            module.to(torch.bfloat16)
+        auto_wrap_policy = get_fsdp_wrap_policy(module=module, config=self.config.model.fsdp_config)
+        fsdp_mesh = self.device_mesh
+        sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        if config.strategy == "fsdp":
+            module = FSDP(
+                module,
+                param_init_fn=init_fn,
+                use_orig_params=False,
+                auto_wrap_policy=auto_wrap_policy,
+                device_id=get_device_id(),
+                sharding_strategy=sharding_strategy,
+                sync_module_states=True,
+                cpu_offload=CPUOffload(offload_params=True),
+                forward_prefetch=self.config.model.fsdp_config.forward_prefetch,
+                device_mesh=self.device_mesh,
+            )
+        elif config.strategy == "fsdp2":
+            assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+            cpu_offload = CPUOffloadPolicy(pin_memory=True)
+            fsdp_kwargs = {
+                "mesh": fsdp_mesh,
+                "offload_policy": cpu_offload,
+                "reshard_after_forward": config.model.fsdp_config.reshard_after_forward,
+                "shard_placement_fn": get_shard_placement_fn(fsdp_size=self.device_mesh.shape[-1]),
+            }
+            full_state = module.state_dict()
+            apply_fsdp2(module, fsdp_kwargs, config.model.fsdp_config)
+            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, cpu_offload)
+        else:
+            raise NotImplementedError(f"Unknown strategy: {config.strategy}")
+        return module
+
+    def _seedx_score(self, prompts: list[str], chosens: list[str]) -> list[float]:
+        input_ids_list = [
+            self.tokenizer.encode(p) + self.tokenizer.encode(c) + [self.tokenizer.eos_token_id]
+            for p, c in zip(prompts, chosens)
+        ]
+        pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        scores: list[float] = []
+        batch_size = getattr(self.config, "seedx_rm_batch_size", 32)
+        for start in range(0, len(input_ids_list), batch_size):
+            batch_ids_list = input_ids_list[start : start + batch_size]
+            max_length = max(len(ids) for ids in batch_ids_list)
+            padded_batch = [ids + [pad_id] * (max_length - len(ids)) for ids in batch_ids_list]
+            attention_mask = [[1] * len(ids) + [0] * (max_length - len(ids)) for ids in batch_ids_list]
+            input_ids = torch.tensor(padded_batch).to(device=get_device_id())
+            attn_mask = torch.tensor(attention_mask).to(device=get_device_id())
+            with torch.no_grad(), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
+                logits = self.rm_module(input_ids, attention_mask=attn_mask).logits
+            for i, ids in enumerate(batch_ids_list):
+                eos_position = ids.index(self.tokenizer.eos_token_id)
+                eos_logit = logits[i, eos_position, :].squeeze().item()
+                scores.append(float(eos_logit))
+        return scores

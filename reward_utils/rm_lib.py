@@ -394,6 +394,69 @@ class GroupRewardModelProcessor:
 
 
 
+
+
+def _seedx_build_prompt(src_text: str, mt_text: str, src_lang: str, trg_lang: str) -> str:
+    src_display = LANG_MAP[src_lang] if len(src_lang) == 2 and src_lang in LANG_MAP else src_lang
+    trg_display = LANG_MAP[trg_lang] if len(trg_lang) == 2 and trg_lang in LANG_MAP else trg_lang
+    trg_tag = f" <{trg_lang}>" if len(trg_lang) == 2 else ""
+    prompt = (
+        f"Translate the following {src_display} sentence into {trg_display}:\n"
+        f"{src_text}{trg_tag}"
+    )
+    return prompt
+
+
+class SeedXRewardModelProcessor:
+    def __init__(self, *args, **kwargs):
+        self.config = kwargs.get("config")
+        self.tokenizer = kwargs.get("tokenizer", None)
+        self.input_tokenizer = kwargs.get("input_tokenizer", self.tokenizer)
+        self.max_prompt_length = getattr(self.config, "prompt_length", 1 << 20)
+        self.extractor_type = self.config.custom_processor.get("extractor_type", "line")
+        self.batch_size = getattr(self.config, "seedx_rm_batch_size", 32)
+        if self.tokenizer is None:
+            raise ValueError("tokenizer must be provided")
+        if self.input_tokenizer is None:
+            raise ValueError("input_tokenizer must be provided")
+
+    def process_input(self, data):
+        response_list = _decode_response(data, self.input_tokenizer, self.extractor_type)
+        src_text_list = [item["src_text"] for item in data.non_tensor_batch["extra_info"]]
+        lang_pair_list = [_get_lang_pair(item) for item in data.non_tensor_batch["extra_info"]]
+        src_langs, tgt_langs = zip(*lang_pair_list)
+        assert len(src_text_list) == len(response_list) == len(src_langs) == len(tgt_langs)
+        prompts: List[str] = []
+        chosens: List[str] = []
+        kept_indices: List[int] = []
+        filtered_indices: List[int] = []
+        for idx, (src_text, mt_text, src_lang, tgt_lang) in enumerate(
+            zip(src_text_list, response_list, src_langs, tgt_langs)
+        ):
+            prompt = _seedx_build_prompt(src_text, mt_text, src_lang, tgt_lang)
+            ids_len = (
+                len(self.tokenizer.encode(prompt))
+                + len(self.tokenizer.encode(mt_text))
+                + 1
+            )
+            if ids_len > self.max_prompt_length:
+                filtered_indices.append(idx)
+                continue
+            kept_indices.append(idx)
+            prompts.append(prompt)
+            chosens.append(mt_text)
+        total_size = len(src_text_list)
+        return prompts, chosens, kept_indices, total_size
+
+    def compute_scores(self, data, generate_fn):
+        prompts, chosens, kept_indices, total_size = self.process_input(data)
+        scores: List[float] = [0.0] * total_size
+        if len(kept_indices) > 0:
+            kept_scores = generate_fn(prompts, chosens)
+            for j, idx in enumerate(kept_indices):
+                scores[idx] = kept_scores[j]
+        return scores
+
 def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
     return 0
     # print(f"[debug] extra_info: {extra_info}")
