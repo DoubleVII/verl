@@ -2171,7 +2171,7 @@ class SeedXRewardModelWorker(RewardModelWorker):
             raise NotImplementedError("Please provide a custom_processor with compute_scores method.")
         scores = self.custom_processor.compute_scores(data, self._seedx_score)
         if not isinstance(scores, torch.Tensor):
-            scores = torch.tensor(scores, dtype=torch.float32)
+            scores = torch.tensor(scores, dtype=torch.float32, device=get_device_id())
         token_level_scores = self._expand_to_token_level(data, scores)
         output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
         output = output.to("cpu")
