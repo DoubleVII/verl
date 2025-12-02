@@ -2181,6 +2181,7 @@ class SeedXRewardModelWorker(RewardModelWorker):
     def _build_seedx_model(self, config):
         from torch.distributed.fsdp import CPUOffload
         from transformers import AutoConfig, MistralForCausalLM
+        from safetensors.torch import load_file
         use_shm = config.model.get("use_shm", False)
         local_path = copy_to_local(config.model.path, use_shm=use_shm)
         trust_remote_code = config.model.get("trust_remote_code", False)
@@ -2192,6 +2193,8 @@ class SeedXRewardModelWorker(RewardModelWorker):
             warnings.simplefilter("ignore")
             module = MistralForCausalLM(model_config)
             module.lm_head = torch.nn.Linear(model_config.hidden_size, 1, bias=False)
+            state_dict = load_file(f"{local_path}/model.safetensors")
+            module.load_state_dict(state_dict, strict=False)
             apply_monkey_patch(
                 model=module,
                 use_remove_padding=config.model.get("use_remove_padding", False),
