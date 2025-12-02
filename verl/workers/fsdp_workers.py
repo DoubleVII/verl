@@ -2137,6 +2137,7 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
 class SeedXRewardModelWorker(RewardModelWorker):
     def __init__(self, config: DictConfig, **kwargs):
         super().__init__(config)
+        self.sharding_strategy_config = self.config.model.get("sharding_strategy", "fsdp2")
         self.init_tokenizer_processor(config.model.path, config.model.input_tokenizer)
 
     def init_tokenizer_processor(self, tokenizer_path: str, input_tokenizer_path: Optional[str] = None):
@@ -2206,7 +2207,7 @@ class SeedXRewardModelWorker(RewardModelWorker):
         auto_wrap_policy = get_fsdp_wrap_policy(module=module, config=self.config.model.fsdp_config)
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
-        if config.strategy == "fsdp":
+        if self.sharding_strategy_config == "fsdp":
             module = FSDP(
                 module,
                 param_init_fn=init_fn,
@@ -2219,7 +2220,7 @@ class SeedXRewardModelWorker(RewardModelWorker):
                 forward_prefetch=self.config.model.fsdp_config.forward_prefetch,
                 device_mesh=self.device_mesh,
             )
-        elif config.strategy == "fsdp2":
+        elif self.sharding_strategy_config == "fsdp2":
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             cpu_offload = CPUOffloadPolicy(pin_memory=True)
             fsdp_kwargs = {
