@@ -459,11 +459,14 @@ class SeedXRewardModelProcessor:
 
     def compute_scores(self, data, generate_fn):
         prompts, chosens, kept_indices, total_size = self.process_input(data)
-        scores: List[float] = [0.0] * total_size
         if len(kept_indices) > 0:
             kept_scores = generate_fn(prompts, chosens)
+            default_score = min(kept_scores)
+            scores: List[float] = [default_score] * total_size
             for j, idx in enumerate(kept_indices):
                 scores[idx] = kept_scores[j]
+        else:
+            scores: List[float] = [self.score_lower_bound] * total_size
         return self.score_postprocess(scores)
 
 def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
