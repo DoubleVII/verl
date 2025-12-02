@@ -2162,8 +2162,6 @@ class SeedXRewardModelWorker(RewardModelWorker):
     def init_model(self):
         import_external_libs(self.config.model.get("external_lib", None))
         self.rm_module = self._build_seedx_model(self.config)
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.rm_module)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
     @DistProfiler.annotate(color="brown")
@@ -2171,8 +2169,6 @@ class SeedXRewardModelWorker(RewardModelWorker):
         data = data.to(get_device_id())
         if not hasattr(self, "custom_processor") or not hasattr(self.custom_processor, "compute_scores"):
             raise NotImplementedError("Please provide a custom_processor with compute_scores method.")
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.rm_module)
         scores = self.custom_processor.compute_scores(data, self._seedx_score)
         if not isinstance(scores, torch.Tensor):
             scores = torch.tensor(scores, dtype=torch.float32)
@@ -2180,8 +2176,6 @@ class SeedXRewardModelWorker(RewardModelWorker):
         output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
         output = output.to("cpu")
         get_torch_device().empty_cache()
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.rm_module)
         return output
 
     def _build_seedx_model(self, config):
