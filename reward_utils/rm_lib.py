@@ -415,6 +415,9 @@ class SeedXRewardModelProcessor:
         self.max_prompt_length = getattr(self.config, "prompt_length", 1 << 20)
         self.extractor_type = self.config.custom_processor.get("extractor_type", "line")
         self.batch_size = getattr(self.config, "seedx_rm_batch_size", 32)
+        self.score_scale_factor = getattr(self.config, "score_scale_factor", 1.0)
+        self.score_lower_bound = getattr(self.config, "score_lower_bound", -10000.0)
+        self.score_upper_bound = getattr(self.config, "score_upper_bound", 10000.0)
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -448,6 +451,12 @@ class SeedXRewardModelProcessor:
         total_size = len(src_text_list)
         return prompts, chosens, kept_indices, total_size
 
+    def score_postprocess(self, scores: List[float]) -> List[float]:
+        return [
+            max(min(score * self.score_scale_factor, self.score_upper_bound), self.score_lower_bound)
+            for score in scores
+        ]
+
     def compute_scores(self, data, generate_fn):
         prompts, chosens, kept_indices, total_size = self.process_input(data)
         scores: List[float] = [0.0] * total_size
@@ -455,7 +464,7 @@ class SeedXRewardModelProcessor:
             kept_scores = generate_fn(prompts, chosens)
             for j, idx in enumerate(kept_indices):
                 scores[idx] = kept_scores[j]
-        return scores
+        return self.score_postprocess(scores)
 
 def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
     return 0
