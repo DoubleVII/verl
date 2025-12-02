@@ -1410,8 +1410,10 @@ def compute_policy_sft_loss(
         sft_loss: `a scalar torch.Tensor`
     """
 
-    positive_advantages = torch.clamp(advantages, 0, None)
-    valid_advantage_mask = response_mask & (advantages > 0)
+    positive_advantages = torch.clamp(advantages, min=0)
+    # Ensure boolean mask for safe logical operations
+    response_mask_bool = response_mask.bool()
+    valid_advantage_mask = response_mask_bool & (advantages > 0)
     sft_loss = -agg_loss(loss_mat=positive_advantages * log_prob, loss_mask=valid_advantage_mask, loss_agg_mode=loss_agg_mode)
 
     return sft_loss
