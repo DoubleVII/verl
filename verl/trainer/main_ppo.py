@@ -213,6 +213,8 @@ class TaskRunner:
                     from verl.workers.fsdp_workers import GenerativeRewardModelWorker as RewardModelWorker
                 elif config.reward_model.strategy == "seedx":
                     from verl.workers.fsdp_workers import SeedXRewardModelWorker as RewardModelWorker
+                elif config.reward_model.strategy == "vheadRM":
+                    from verl.workers.fsdp_workers import VHeadRewardModelWorker as RewardModelWorker
                 else:
                     raise NotImplementedError
             elif use_legacy_worker_impl == "disable":

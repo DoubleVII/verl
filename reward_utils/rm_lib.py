@@ -432,6 +432,19 @@ def _seedx_build_prompt(src_text: str, mt_text: str, src_lang: str, trg_lang: st
     return prompt
 
 
+def _vanilla_rm_build_prompt(tokenizer, src_lang: str, trg_lang: str, src_text: str, mt_text: str, chat_template: bool = True) -> str:
+    src_display = LANG_MAP[src_lang] if len(src_lang) == 2 and src_lang in LANG_MAP else src_lang
+    trg_display = LANG_MAP[trg_lang] if len(trg_lang) == 2 and trg_lang in LANG_MAP else trg_lang
+    prompt = f"Translate the following text from {src_display} into {trg_display}:\n{src_display}: {src_text}\n{trg_display}:"
+    if chat_template:
+        messages = [{"role": "user", "content": prompt}]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    else:
+        prompt += " "
+    full_prompt = f"{prompt}{mt_text}{tokenizer.eos_token}"
+    return full_prompt
+
+
 class SeedXRewardModelProcessor:
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
@@ -489,6 +502,65 @@ class SeedXRewardModelProcessor:
         prompts, chosens, kept_indices, total_size = self.process_input(data)
         if len(kept_indices) > 0:
             kept_scores = generate_fn(prompts, chosens)
+            default_score = min(kept_scores)
+            scores: List[float] = [default_score] * total_size
+            for j, idx in enumerate(kept_indices):
+                scores[idx] = kept_scores[j]
+        else:
+            scores: List[float] = [self.score_lower_bound] * total_size
+        return self.score_postprocess(scores)
+
+
+class DiscriminativeRewardModelProcessor:
+    def __init__(self, *args, **kwargs):
+        self.config = kwargs.get("config")
+        self.tokenizer = kwargs.get("tokenizer", None)
+        self.input_tokenizer = kwargs.get("input_tokenizer", self.tokenizer)
+        self.max_prompt_length = getattr(self.config, "prompt_length", 1 << 20)
+        self.extractor_type = self.config.custom_processor.get("extractor_type", "line")
+        self.chat_template = getattr(self.config, "chat_template", True)
+        self.batch_size = getattr(self.config, "seedx_rm_batch_size", 32)
+        self.score_scale_factor = getattr(self.config, "score_scale_factor", 1.0)
+        self.score_lower_bound = getattr(self.config, "score_lower_bound", -10000.0)
+        self.score_upper_bound = getattr(self.config, "score_upper_bound", 10000.0)
+        if self.tokenizer is None:
+            raise ValueError("tokenizer must be provided")
+        if self.input_tokenizer is None:
+            raise ValueError("input_tokenizer must be provided")
+
+    def process_input(self, data):
+        response_list = _decode_response(data, self.input_tokenizer, self.extractor_type)
+        src_text_list = [item["src_text"] for item in data.non_tensor_batch["extra_info"]]
+        lang_pair_list = [_get_lang_pair(item) for item in data.non_tensor_batch["extra_info"]]
+        src_langs, tgt_langs = zip(*lang_pair_list)
+        assert len(src_text_list) == len(response_list) == len(src_langs) == len(tgt_langs)
+        input_texts = []
+        kept_indices = []
+        filtered_indices = []
+        for idx, (src_text, mt_text, src_lang, tgt_lang) in enumerate(zip(src_text_list, response_list, src_langs, tgt_langs)):
+            if mt_text is None:
+                filtered_indices.append(idx)
+                continue
+            full_text = _vanilla_rm_build_prompt(self.tokenizer, src_lang, tgt_lang, src_text, mt_text, chat_template=self.chat_template)
+            ids_len = len(self.tokenizer.encode(full_text))
+            if ids_len > self.max_prompt_length:
+                filtered_indices.append(idx)
+                continue
+            kept_indices.append(idx)
+            input_texts.append(full_text)
+        total_size = len(src_text_list)
+        return input_texts, kept_indices, total_size
+
+    def score_postprocess(self, scores: List[float]) -> List[float]:
+        return [
+            max(min(score * self.score_scale_factor, self.score_upper_bound), self.score_lower_bound)
+            for score in scores
+        ]
+
+    def compute_scores(self, data, generate_fn):
+        input_texts, kept_indices, total_size = self.process_input(data)
+        if len(kept_indices) > 0:
+            kept_scores = generate_fn(input_texts)
             default_score = min(kept_scores)
             scores: List[float] = [default_score] * total_size
             for j, idx in enumerate(kept_indices):
