@@ -2284,7 +2284,7 @@ class VHeadRewardModelWorker(RewardModelWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         import_external_libs(self.config.model.get("external_lib", None))
-        self.rm_module = self._build_discriminative_model(self.config)
+        self.rm_module = self._build_rm_model(self.config)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
     @DistProfiler.annotate(color="brown")
@@ -2292,7 +2292,7 @@ class VHeadRewardModelWorker(RewardModelWorker):
         data = data.to(get_device_id())
         if not hasattr(self, "custom_processor") or not hasattr(self.custom_processor, "compute_scores"):
             raise NotImplementedError("Please provide a custom_processor with compute_scores method.")
-        scores = self.custom_processor.compute_scores(data, self._discriminative_score)
+        scores = self.custom_processor.compute_scores(data, self._rm_score)
         if not isinstance(scores, torch.Tensor):
             scores = torch.tensor(scores, dtype=torch.float32, device=get_device_id())
         token_level_scores = self._expand_to_token_level(data, scores)
@@ -2301,7 +2301,7 @@ class VHeadRewardModelWorker(RewardModelWorker):
         get_torch_device().empty_cache()
         return output
 
-    def _build_discriminative_model(self, config):
+    def _build_rm_model(self, config):
         from torch.distributed.fsdp import CPUOffload
         from transformers import AutoConfig, AutoModelForCausalLM
         from safetensors import safe_open
@@ -2370,7 +2370,7 @@ class VHeadRewardModelWorker(RewardModelWorker):
             raise NotImplementedError(f"Unknown strategy: {config.strategy}")
         return module
 
-    def _discriminative_score(self, input_texts: list[str]) -> list[float]:
+    def _rm_score(self, input_texts: list[str]) -> list[float]:
         inputs = self.tokenizer(input_texts, return_tensors="pt", padding=True)
         inputs = {k: v.to(get_device_id()) for k, v in inputs.items()}
         with torch.no_grad(), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
