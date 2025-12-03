@@ -125,7 +125,7 @@ def single_extract_score(output_text: str) -> Optional[float]:
         last_line_index = output_text.rfind("\n")
         last_line = output_text[last_line_index:].strip()
         score = int(last_line)
-        return score/10.0
+        return float(score)
     except Exception:
         return None
 
@@ -257,6 +257,7 @@ class RewardModelProcessor:
         self.max_prompt_length = self.config.prompt_length
         self.extractor_type = self.config.custom_processor.get("extractor_type", "line")
         print(f"Using extractor_type: {self.extractor_type}")
+        self.score_scale_factor = getattr(self.config, "score_scale_factor", 10.0)
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -294,12 +295,14 @@ class RewardModelProcessor:
         return prompt_list, kept_indices, total_size
     
     def process_output(self, outputs, data, kept_indices, total_size) -> list[float|int]:
-        final_scores: list[int] = [0] * total_size
+        final_scores: list[float] = [0.0] * total_size
         for j, output in enumerate(outputs):
             output_text = output.outputs[0].text
             score = single_extract_score(output_text)
             if score is None:
-                score = 0
+                score = 0.0
+            else:
+                score = score / self.score_scale_factor
             if j < len(kept_indices):
                 final_scores[kept_indices[j]] = score
 
@@ -322,6 +325,7 @@ class GroupRewardModelProcessor:
         print(f"Using extractor_type: {self.extractor_type}")
         self.prompt_type = getattr(self.config, "group_prompt_type", "ranking_score")
         self.add_example = getattr(self.config, "group_add_example", False)
+        self.score_scale_factor = getattr(self.config, "score_scale_factor", 10.0)
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -400,7 +404,7 @@ class GroupRewardModelProcessor:
             scores = group_extract_scores(text, self.prompt_type, len(dup_map))
             if scores is None:
                 scores = [0] * len(dup_map)
-            normalized = [s / 10.0 for s in scores]
+            normalized = [s / self.score_scale_factor for s in scores]
             for k, targets in enumerate(dup_map):
                 sc = normalized[k]
                 for idx in targets:
