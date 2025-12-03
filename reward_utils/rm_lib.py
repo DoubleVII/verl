@@ -511,7 +511,7 @@ class SeedXRewardModelProcessor:
         return self.score_postprocess(scores)
 
 
-class DiscriminativeRewardModelProcessor:
+class VHeadRewardModelProcessor:
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
         self.tokenizer = kwargs.get("tokenizer", None)
