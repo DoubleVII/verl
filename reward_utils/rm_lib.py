@@ -3,32 +3,36 @@ from typing import Optional, List, Dict, Tuple
 import re
 
 
-def _line_extractor(response:str) -> str:
-    return response.strip().split("\n")[-1].strip()
-
-def _block_extractor(response:str) -> str:
-    empty_out = "None"
-
+def _line_extractor(response: str) -> Optional[str]:
     response = response.strip()
     if not response:
-        return empty_out
+        return None
+    last = response.split("\n")[-1].strip()
+    if not last:
+        return None
+    return last
+
+def _block_extractor(response: str) -> Optional[str]:
+    response = response.strip()
+    if not response:
+        return None
     if not response.endswith("```"):
-        return empty_out
+        return None
     response = response[:-3]
     block_start = response.rfind("```")
     if block_start == -1:
-        return empty_out
-    extract_out = response[block_start+3:].strip()
+        return None
+    extract_out = response[block_start + 3 :].strip()
     if not extract_out:
-        return empty_out
+        return None
     return extract_out
 
 
 
     
 
-def _decode_response(data, src_tokenizer, extractor_type: str = "line"):
-    response_list = []
+def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[Optional[str]]:
+    response_list: List[Optional[str]] = []
 
     for i in range(data.batch.batch_size[0]):
         # extract response
@@ -39,16 +43,15 @@ def _decode_response(data, src_tokenizer, extractor_type: str = "line"):
 
         # decode
         response = src_tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-        # remove bos and eos
         response = response.replace(src_tokenizer.eos_token, "")
         if extractor_type == "line":
-            response = _line_extractor(response)
+            extracted = _line_extractor(response)
         elif extractor_type == "codeblock":
-            response = _block_extractor(response)
+            extracted = _block_extractor(response)
         else:
             raise ValueError(f"extractor_type: {extractor_type}")
-        
-        response_list.append(response)
+
+        response_list.append(extracted)
 
         # if i == 0:
         #     # for debugging purpose
@@ -262,6 +265,9 @@ class RewardModelProcessor:
         kept_indices = []
         filtered_indices = []
         for idx, (src_text, mt_text, src_lang, tgt_lang) in enumerate(zip(src_text_list, response_list, src_langs, tgt_langs)):
+            if mt_text is None:
+                filtered_indices.append(idx)
+                continue
             prompt = single_get_prompt(src_text, mt_text, src_lang, tgt_lang)
             messages = [
                 {"role": "user", "content": prompt},
@@ -343,23 +349,34 @@ class GroupRewardModelProcessor:
             seen: Dict[str, int] = {}
             unique_texts: List[str] = []
             dup_map: List[List[int]] = []
+            invalid_indices: List[int] = []
             for idx in indices:
                 t = responses[idx]
+                if t is None:
+                    invalid_indices.append(idx)
+                    continue
                 if t in seen:
                     dup_map[seen[t]].append(idx)
                 else:
                     seen[t] = len(unique_texts)
                     unique_texts.append(t)
                     dup_map.append([idx])
-            if len(unique_texts) == 1:
-                zero_groups.append(indices)
+            valid_indices = [i for i in indices if i not in invalid_indices]
+            if len(unique_texts) <= 1:
+                if valid_indices:
+                    zero_groups.append(valid_indices)
+                for inv in invalid_indices:
+                    zero_groups.append([inv])
                 continue
             prompt = group_get_prompt(src_lang, tgt_lang, src_text, unique_texts, self.prompt_type, add_example=self.add_example)
             messages = [{"role": "user", "content": prompt}]
             input_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             raw_ids = self.tokenizer.encode(input_text, add_special_tokens=False)
             if len(raw_ids) > self.max_prompt_length:
-                zero_groups.append(indices)
+                if valid_indices:
+                    zero_groups.append(valid_indices)
+                for inv in invalid_indices:
+                    zero_groups.append([inv])
                 continue
             kept_groups.append({"uid": [uid_key], "dup_map": dup_map})
             prompt_list.append({"prompt_token_ids": raw_ids})
@@ -436,6 +453,9 @@ class SeedXRewardModelProcessor:
         for idx, (src_text, mt_text, src_lang, tgt_lang) in enumerate(
             zip(src_text_list, response_list, src_langs, tgt_langs)
         ):
+            if mt_text is None:
+                filtered_indices.append(idx)
+                continue
             prompt = _seedx_build_prompt(src_text, mt_text, src_lang, tgt_lang)
             ids_len = (
                 len(self.tokenizer.encode(prompt))
