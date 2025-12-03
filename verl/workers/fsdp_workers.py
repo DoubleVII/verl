@@ -2240,7 +2240,7 @@ class SeedXRewardModelWorker(RewardModelWorker):
         ]
         pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
         scores: list[float] = []
-        batch_size = getattr(self.config, "seedx_rm_batch_size", 32)
+        batch_size = getattr(self.config, "rm_batch_size", 32)
         for start in range(0, len(input_ids_list), batch_size):
             batch_ids_list = input_ids_list[start : start + batch_size]
             max_length = max(len(ids) for ids in batch_ids_list)
@@ -2371,10 +2371,15 @@ class VHeadRewardModelWorker(RewardModelWorker):
         return module
 
     def _rm_score(self, input_texts: list[str]) -> list[float]:
-        inputs = self.tokenizer(input_texts, return_tensors="pt", padding=True)
-        inputs = {k: v.to(get_device_id()) for k, v in inputs.items()}
-        with torch.no_grad(), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
-            values = self.rm_module(**inputs, return_dict=True, use_cache=False)[-1]
-        idx = inputs["attention_mask"].sum(dim=-1, keepdim=True) - 1
-        scores = values.gather(dim=-1, index=idx)
-        return scores.squeeze(-1).tolist()
+        batch_size = getattr(self.config, "rm_batch_size", 32)
+        results: list[float] = []
+        for start in range(0, len(input_texts), batch_size):
+            batch_texts = input_texts[start : start + batch_size]
+            inputs = self.tokenizer(batch_texts, return_tensors="pt", padding=True)
+            inputs = {k: v.to(get_device_id()) for k, v in inputs.items()}
+            with torch.no_grad(), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
+                values = self.rm_module(**inputs, return_dict=True, use_cache=False)[-1]
+            idx = inputs["attention_mask"].sum(dim=-1, keepdim=True) - 1
+            batch_scores = values.gather(dim=-1, index=idx).squeeze(-1).tolist()
+            results.extend(float(s) for s in batch_scores)
+        return results
