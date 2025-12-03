@@ -28,7 +28,13 @@ def _block_extractor(response: str) -> Optional[str]:
     return extract_out
 
 
-
+def _one_line_extractor(response: str) -> Optional[str]:
+    response = response.strip()
+    if not response:
+        return None
+    if "\n" in response:
+        return None
+    return response
     
 
 def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[Optional[str]]:
@@ -48,6 +54,8 @@ def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[
             extracted = _line_extractor(response)
         elif extractor_type == "codeblock":
             extracted = _block_extractor(response)
+        elif extractor_type == "oneline":
+            extracted = _one_line_extractor(response)
         else:
             raise ValueError(f"extractor_type: {extractor_type}")
 
