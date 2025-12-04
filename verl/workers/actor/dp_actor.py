@@ -413,7 +413,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
-                    sft_coeff = self.config.get("sft_coeff", 0)
+                    sft_coef = self.config.get("sft_coef", 0)
 
                     if self.config.use_dynamic_bsz:
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
@@ -472,14 +472,14 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         policy_loss = pg_loss
 
-                    if sft_coeff != 0:
+                    if sft_coef != 0:
                         sft_loss = compute_policy_sft_loss(
                             log_prob=log_prob,
                             advantages=advantages,
                             response_mask=response_mask,
                             loss_agg_mode=loss_agg_mode,
                         )
-                        policy_loss = policy_loss + sft_loss * sft_coeff
+                        policy_loss = policy_loss + sft_loss * sft_coef
                         micro_batch_metrics["actor/sft_loss"] = sft_loss.detach().item() * loss_scale_factor
 
 
