@@ -249,6 +249,24 @@ def group_extract_scores(output_text: str, prompt_type: str, expected_num: int) 
     except Exception:
         return None
 
+def _compute_overlong_penalty(length: int, overlong_buffer_cfg: Optional[Dict]) -> float:
+    if not overlong_buffer_cfg:
+        return 0.0
+    if not overlong_buffer_cfg.get("enable", False):
+        return 0.0
+    max_resp_len = overlong_buffer_cfg.get("max_resp_len", None)
+    buffer_len = overlong_buffer_cfg.get("len", 0)
+    penalty_factor = overlong_buffer_cfg.get("penalty_factor", 0.0)
+    if max_resp_len is None or buffer_len <= 0 or penalty_factor <= 0.0:
+        return 0.0
+    threshold = max_resp_len - buffer_len
+    if length <= threshold:
+        return 0.0
+    delta = length - threshold
+    if delta >= buffer_len:
+        return penalty_factor
+    return penalty_factor * (delta / buffer_len)
+
 class RewardModelProcessor:
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
@@ -258,6 +276,7 @@ class RewardModelProcessor:
         self.extractor_type = self.config.custom_processor.get("extractor_type", "line")
         print(f"Using extractor_type: {self.extractor_type}")
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
+        self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -304,6 +323,17 @@ class RewardModelProcessor:
             else:
                 score = score * self.score_scale_factor
             if j < len(kept_indices):
+                idx = kept_indices[j]
+                response_ids = data.batch["responses"][idx]
+                resp_len = response_ids.shape[-1]
+                valid_len = data.batch["attention_mask"][idx][-resp_len:].sum()
+                try:
+                    valid_len_int = int(valid_len)
+                except Exception:
+                    valid_len_int = resp_len
+                penalty = _compute_overlong_penalty(valid_len_int, self.overlong_buffer_cfg)
+                score = score - penalty
+            if j < len(kept_indices):
                 final_scores[kept_indices[j]] = score
 
         # filtered indices remain 0
@@ -326,6 +356,7 @@ class GroupRewardModelProcessor:
         self.prompt_type = getattr(self.config, "group_prompt_type", "ranking_score")
         self.add_example = getattr(self.config, "group_add_example", False)
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
+        self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -390,7 +421,17 @@ class GroupRewardModelProcessor:
                 for inv in invalid_indices:
                     zero_groups.append([inv])
                 continue
-            kept_groups.append({"uid": [uid_key], "dup_map": dup_map})
+            candidate_lens: List[int] = []
+            for targets in dup_map:
+                first_idx = targets[0]
+                response_ids = data.batch["responses"][first_idx]
+                resp_len = response_ids.shape[-1]
+                valid_len = data.batch["attention_mask"][first_idx][-resp_len:].sum()
+                try:
+                    candidate_lens.append(int(valid_len))
+                except Exception:
+                    candidate_lens.append(resp_len)
+            kept_groups.append({"uid": [uid_key], "dup_map": dup_map, "candidate_lens": candidate_lens})
             prompt_list.append({"prompt_token_ids": raw_ids})
         total_size = len(responses)
         return prompt_list, kept_groups, zero_groups, total_size
@@ -401,12 +442,14 @@ class GroupRewardModelProcessor:
             text = output.outputs[0].text
             group_info = kept_groups[j]
             dup_map = group_info["dup_map"]
+            candidate_lens = group_info.get("candidate_lens", [0] * len(dup_map))
             scores = group_extract_scores(text, self.prompt_type, len(dup_map))
             if scores is None:
                 scores = [0] * len(dup_map)
             normalized = [s * self.score_scale_factor for s in scores]
             for k, targets in enumerate(dup_map):
-                sc = normalized[k]
+                penalty = _compute_overlong_penalty(candidate_lens[k], self.overlong_buffer_cfg)
+                sc = normalized[k] - penalty
                 for idx in targets:
                     final_scores[idx] = sc
         for indices in zero_groups:
@@ -460,6 +503,7 @@ class SeedXRewardModelProcessor:
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 1.0)
         self.score_lower_bound = getattr(self.config, "score_lower_bound", -10000.0)
         self.score_upper_bound = getattr(self.config, "score_upper_bound", 10000.0)
+        self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -509,7 +553,9 @@ class SeedXRewardModelProcessor:
             default_score = min(kept_scores)
             scores: List[float] = [default_score] * total_size
             for j, idx in enumerate(kept_indices):
-                scores[idx] = kept_scores[j]
+                chosen_len = len(self.input_tokenizer.encode(chosens[j]))
+                penalty = _compute_overlong_penalty(chosen_len, self.overlong_buffer_cfg)
+                scores[idx] = kept_scores[j] - penalty
         else:
             scores: List[float] = [self.score_lower_bound] * total_size
         return self.score_postprocess(scores)
@@ -527,6 +573,7 @@ class VHeadRewardModelProcessor:
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 1.0)
         self.score_lower_bound = getattr(self.config, "score_lower_bound", -10000.0)
         self.score_upper_bound = getattr(self.config, "score_upper_bound", 10000.0)
+        self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -568,7 +615,15 @@ class VHeadRewardModelProcessor:
             default_score = min(kept_scores)
             scores: List[float] = [default_score] * total_size
             for j, idx in enumerate(kept_indices):
-                scores[idx] = kept_scores[j]
+                response_ids = data.batch["responses"][idx]
+                resp_len = response_ids.shape[-1]
+                valid_len = data.batch["attention_mask"][idx][-resp_len:].sum()
+                try:
+                    valid_len_int = int(valid_len)
+                except Exception:
+                    valid_len_int = resp_len
+                penalty = _compute_overlong_penalty(valid_len_int, self.overlong_buffer_cfg)
+                scores[idx] = kept_scores[j] - penalty
         else:
             scores: List[float] = [self.score_lower_bound] * total_size
         return self.score_postprocess(scores)
