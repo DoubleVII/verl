@@ -553,8 +553,14 @@ class SeedXRewardModelProcessor:
             default_score = min(kept_scores)
             scores: List[float] = [default_score] * total_size
             for j, idx in enumerate(kept_indices):
-                chosen_len = len(self.input_tokenizer.encode(chosens[j]))
-                penalty = _compute_overlong_penalty(chosen_len, self.overlong_buffer_cfg)
+                response_ids = data.batch["responses"][idx]
+                resp_len = response_ids.shape[-1]
+                valid_len = data.batch["attention_mask"][idx][-resp_len:].sum()
+                try:
+                    valid_len_int = int(valid_len)
+                except Exception:
+                    valid_len_int = resp_len
+                penalty = _compute_overlong_penalty(valid_len_int, self.overlong_buffer_cfg)
                 scores[idx] = kept_scores[j] - penalty
         else:
             scores: List[float] = [self.score_lower_bound] * total_size
