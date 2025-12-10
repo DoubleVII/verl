@@ -276,6 +276,7 @@ class RewardModelProcessor:
         self.extractor_type = self.config.custom_processor.get("extractor_type", "line")
         print(f"Using extractor_type: {self.extractor_type}")
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
+        self.default_reward = getattr(self.config, "default_reward", 0.0)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
@@ -314,12 +315,12 @@ class RewardModelProcessor:
         return prompt_list, kept_indices, total_size
     
     def process_output(self, outputs, data, kept_indices, total_size) -> list[float|int]:
-        final_scores: list[float] = [0.0] * total_size
+        final_scores: list[float] = [self.default_reward] * total_size
         for j, output in enumerate(outputs):
             output_text = output.outputs[0].text
             score = single_extract_score(output_text)
             if score is None:
-                score = 0.0
+                score = self.default_reward
             else:
                 score = score * self.score_scale_factor
             if j < len(kept_indices):
@@ -356,6 +357,7 @@ class GroupRewardModelProcessor:
         self.prompt_type = getattr(self.config, "group_prompt_type", "ranking_score")
         self.add_example = getattr(self.config, "group_add_example", False)
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
+        self.default_reward = getattr(self.config, "default_reward", 0.0)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
@@ -437,7 +439,7 @@ class GroupRewardModelProcessor:
         return prompt_list, kept_groups, zero_groups, total_size
 
     def process_output(self, outputs, kept_groups, zero_groups, total_size) -> List[float]:
-        final_scores: List[float] = [0.0] * total_size
+        final_scores: List[float] = [self.default_reward] * total_size
         for j, output in enumerate(outputs):
             text = output.outputs[0].text
             group_info = kept_groups[j]
@@ -445,7 +447,7 @@ class GroupRewardModelProcessor:
             candidate_lens = group_info.get("candidate_lens", [0] * len(dup_map))
             scores = group_extract_scores(text, self.prompt_type, len(dup_map))
             if scores is None:
-                scores = [0] * len(dup_map)
+                scores = [self.default_reward] * len(dup_map)
             normalized = [s * self.score_scale_factor for s in scores]
             for k, targets in enumerate(dup_map):
                 penalty = _compute_overlong_penalty(candidate_lens[k], self.overlong_buffer_cfg)
@@ -454,7 +456,7 @@ class GroupRewardModelProcessor:
                     final_scores[idx] = sc
         for indices in zero_groups:
             for idx in indices:
-                final_scores[idx] = 0.0
+                final_scores[idx] = self.default_reward
         return final_scores
 
     def compute_scores(self, data, generate_fn):
