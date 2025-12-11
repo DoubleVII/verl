@@ -1,6 +1,5 @@
 
-from typing import Optional, List, Dict, Tuple
-import re
+from typing import Optional, List, Dict, Tuple, Iterable
 
 
 def _line_extractor(response: str) -> Optional[str]:
@@ -636,7 +635,78 @@ class VHeadRewardModelProcessor:
             scores: List[float] = [self.score_lower_bound] * total_size
         return self.score_postprocess(scores)
 
+
+
+
 def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
     return 0
     # print(f"[debug] extra_info: {extra_info}")
     # raise ValueError("extra_info must be provided")
+
+
+
+def batch_bleurt_reward_fn(
+    data_sources,
+    solution_strs,
+    ground_truths,
+    extra_infos=None,
+    extractor_type: str = "line",
+    score_scale_factor: float = 1.0,
+):
+    assert extra_infos is not None
+    assert (
+        isinstance(data_sources, Iterable)
+        and isinstance(solution_strs, Iterable)
+        and isinstance(ground_truths, Iterable)
+        and isinstance(extra_infos, Iterable)
+    )
+    assert (
+        len(data_sources)
+        == len(solution_strs)
+        == len(ground_truths)
+        == len(extra_infos)
+    )
+    n = len(solution_strs)
+    kept_mt: List[str] = []
+    kept_ref: List[str] = []
+    kept_idx: List[int] = []
+    default_score = 0.0
+    for i in range(n):
+        info = extra_infos[i] if extra_infos is not None else {}
+        ref = None
+        if isinstance(info, dict):
+            ref = info.get("tgt_text") or info.get("trg_text")
+        if ref is None:
+            ref = ground_truths[i]
+        mt_raw = solution_strs[i]
+        if isinstance(mt_raw, str):
+            if extractor_type == "line":
+                mt = _line_extractor(mt_raw)
+            elif extractor_type == "codeblock":
+                mt = _block_extractor(mt_raw)
+            elif extractor_type == "oneline":
+                mt = _one_line_extractor(mt_raw)
+            else:
+                mt = mt_raw
+        else:
+            mt = None
+        if isinstance(mt, str) and isinstance(ref, str) and mt.strip() and ref.strip():
+            kept_mt.append(mt)
+            kept_ref.append(ref)
+            kept_idx.append(i)
+    if len(kept_idx) > 0:
+        try:
+            try:
+                from .bleurt_service import func_call as bleurt_func_call
+            except Exception:
+                from reward_utils.bleurt_service import func_call as bleurt_func_call
+            result = bleurt_func_call("BLEURT-20", kept_mt, kept_ref)
+            scores_list = result.get("scores", [])
+        except Exception:
+            scores_list = [default_score] * len(kept_idx)
+    else:
+        scores_list = []
+    final_scores: List[float] = [default_score] * n
+    for j, idx in enumerate(kept_idx):
+        final_scores[idx] = float(scores_list[j]) * float(score_scale_factor)
+    return final_scores
