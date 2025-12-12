@@ -91,7 +91,13 @@ def validate_ranking(test_str: str, ref_str: str) -> bool:
         return False
 
 
-def ranking_reward_fn_no_cot(data_source, solution_str, ground_truth, extra_info=None):
+def ranking_reward_fn_no_cot(
+    data_source, 
+    solution_str, 
+    ground_truth, 
+    extra_info=None,
+    score_scale_factor: float = 1.0,
+):
     """
     ranking reward function for no cot (direct ranking prediction).
     """
@@ -102,13 +108,20 @@ def ranking_reward_fn_no_cot(data_source, solution_str, ground_truth, extra_info
     if solution_str.count(pred_ranking_str) != 1:  # prohibit repeat output
         return {"score": 0, "valid_answer": 0}
 
+    base_score = compare_orderings(pred_ranking_str, ground_truth)
     return {
-        "score": compare_orderings(pred_ranking_str, ground_truth),
+        "score": float(base_score) * float(score_scale_factor),
         "valid_answer": 1,
     }
 
 
-def ranking_reward_fn_zero(data_source, solution_str, ground_truth, extra_info=None):
+def ranking_reward_fn_zero(
+    data_source, 
+    solution_str, 
+    ground_truth, 
+    extra_info=None,
+    score_scale_factor: float = 1.0,
+):
     """
     ranking reward function for zero cot (base model RL).
     """
@@ -129,13 +142,20 @@ def ranking_reward_fn_zero(data_source, solution_str, ground_truth, extra_info=N
     if solution_str.count(pred_ranking_str) != 1:  # prohibit repeat output
         return {"score": 0, "valid_answer": 0}
 
+    base_score = compare_orderings(pred_ranking_str, ground_truth)
     return {
-        "score": compare_orderings(pred_ranking_str, ground_truth),
+        "score": float(base_score) * float(score_scale_factor),
         "valid_answer": 1,
     }
 
 
-def ranking_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
+def ranking_reward_fn(
+    data_source, 
+    solution_str, 
+    ground_truth, 
+    extra_info=None,
+    score_scale_factor: float = 1.0,
+):
     """
     ranking reward function for cold-start (SFT-model RL).
     """
@@ -147,7 +167,9 @@ def ranking_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
     if len(cot_text) == 0:
         return {"score": 0, "valid_answer": 0}
     
-    return ranking_reward_fn_no_cot(data_source, solution_str, ground_truth, extra_info)
+    return ranking_reward_fn_no_cot(
+        data_source, solution_str, ground_truth, extra_info, score_scale_factor=score_scale_factor
+    )
 
 
 def _score_to_rank(d) -> str:
@@ -236,7 +258,11 @@ def _parse_score_text(score_text: str) -> Optional[dict]:
 
 
 def ranking_score_reward_fn_no_cot(
-    data_source, solution_str, ground_truth: Union[str, dict], extra_info=None
+    data_source, 
+    solution_str, 
+    ground_truth: Union[str, dict], 
+    extra_info=None,
+    score_scale_factor: float = 1.0,
 ):
     if isinstance(ground_truth, str):
         ground_truth = json.loads(ground_truth)
@@ -252,8 +278,9 @@ def ranking_score_reward_fn_no_cot(
         return reward_out
 
     pred_score_to_rank = _score_to_rank(pred_score_dict)
+    # Use unscaled score for internal consistency check
     consistency_check = ranking_reward_fn_no_cot(
-        data_source, ranking_text, pred_score_to_rank, extra_info
+        data_source, ranking_text, pred_score_to_rank, extra_info, score_scale_factor=1.0
     )
     if consistency_check["score"] != 1:
         return reward_out
@@ -270,7 +297,7 @@ def ranking_score_reward_fn_no_cot(
     ranking_reward = compare_orderings(pred_score_to_rank, ref_score_to_rank)
     score_reward = compare_ranking_scores(pred_score_dict, ground_truth)
     reward = ranking_reward + score_reward  # [0, 2]
-    reward_out["score"] = reward
+    reward_out["score"] = float(reward) * float(score_scale_factor)
     reward_out["valid_answer"] = 1
     reward_out["ranking_reward"] = ranking_reward
     reward_out["score_reward"] = score_reward
@@ -278,7 +305,11 @@ def ranking_score_reward_fn_no_cot(
 
 
 def ranking_score_reward_fn(
-    data_source, solution_str, ground_truth: Union[str, dict], extra_info=None
+    data_source, 
+    solution_str, 
+    ground_truth: Union[str, dict], 
+    extra_info=None,
+    score_scale_factor: float = 1.0,
 ):
     reward_out = {"score": 0, "valid_answer": 0, "ranking_reward": 0, "score_reward": 0}
     extract_out = _extract_ranking_score(solution_str)
@@ -298,5 +329,5 @@ def ranking_score_reward_fn(
     
     no_cot_solution_str = f"{ranking_text}\n{score_text}"
     return ranking_score_reward_fn_no_cot(
-        data_source, no_cot_solution_str, ground_truth, extra_info
+        data_source, no_cot_solution_str, ground_truth, extra_info, score_scale_factor=score_scale_factor
     )
