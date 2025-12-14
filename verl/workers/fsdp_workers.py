@@ -1962,6 +1962,7 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
             
             del merged_cfg.actor["model_config"]
             merged_cfg.actor = actor_config.actor
+            merged_cfg.actor.ppo_micro_batch_size_per_gpu = 1
             # merged_cfg.actor.fsdp_config = actor_config.actor.fsdp_config
             
 
