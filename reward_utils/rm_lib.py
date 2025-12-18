@@ -13,6 +13,8 @@ def _line_extractor(response: str) -> Optional[str]:
 
 def _block_extractor(response: str) -> Optional[str]:
     response = response.strip()
+    if response.count("```") != 2:
+        return None
     if not response:
         return None
     if not response.endswith("```"):
