@@ -19,6 +19,7 @@ def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
         0: 1,
         1: 0.8,
         2: 0.4,
+        3: 0.2,
     }
 
     score = _extract_score(solution_str)
@@ -31,13 +32,5 @@ def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
         reward = _error_reward_map[score_error]
     else:
         reward = 0
-    
-    # correction
-    if ground_truth == 0 or ground_truth == 10:
-        reward *= 1.6
-        reward = min(reward, 1)
-    elif ground_truth == 1 or ground_truth == 9:
-        reward *= 1.2
-        reward = min(reward, 1)
     
     return reward
