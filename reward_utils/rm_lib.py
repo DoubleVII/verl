@@ -57,6 +57,8 @@ def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[
             extracted = _block_extractor(response)
         elif extractor_type == "oneline":
             extracted = _one_line_extractor(response)
+        elif extractor_type == "none":
+            extracted = response.strip()
         else:
             raise ValueError(f"extractor_type: {extractor_type}")
 
