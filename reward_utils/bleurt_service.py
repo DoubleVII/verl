@@ -9,7 +9,7 @@ import tempfile
 from typing import Dict
 
 euler.install_thrift_import_hook()
-from utils.idl.bleurt_thrift import BleurtService, BleurtReq
+from reward_utils.idl.bleurt_thrift import BleurtService, BleurtReq
 
 
 
