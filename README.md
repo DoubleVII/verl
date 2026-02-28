@@ -72,6 +72,7 @@ ray job submit \
     -- \
     python3 -m \
     verl.trainer.main_ppo \
+    actor_rollout_ref.rollout.name=sglang \ # Use sglang as the inference engine for the policy model
     reward_model.enable=True \ # Enable reward model and set strategy to GenRM
     reward_model.strategy=GenRM \
     reward_model.model.path=path/to/your_GenRM \
