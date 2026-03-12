@@ -1560,3 +1560,91 @@ def compute_pf_ppo_reweight_data(
     resampled_data.meta_info = resampled_meta_info
 
     return resampled_data
+
+
+
+@register_adv_est("ngrpo")
+def compute_ngrpo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+    max_reward: float = 1.0,
+    add_max_reward_num: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for NGRPO, operating only on Outcome reward
+    (with only one scalar reward for each response).
+    
+    NGRPO adds virtual max-reward samples when computing group statistics,
+    which helps stabilize training and improve exploration.
+
+    Args:
+        token_level_rewards: `(torch.Tensor)`
+            shape is (bs, response_length)
+        response_mask: `(torch.Tensor)`
+            shape is (bs, response_length)
+        index: `(np.ndarray)`
+            index array for grouping
+        epsilon: `(float)`
+            small value to avoid division by zero
+        norm_adv_by_std_in_grpo: `(bool)`
+            whether to scale the advantage by std
+        config: `(Optional[AlgoConfig])`
+            algorithm configuration object
+        max_reward: `(float)`
+            the setting of max reward for the task (default: 1.0)
+        add_max_reward_num: `(int)`
+            number of virtual max-reward samples to add (default: 1)
+
+    Note:
+        If norm_adv_by_std_in_grpo is True, the advantage is scaled by the std.
+        If False, the advantage is not scaled.
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape is (bs, response_length)
+        Returns: `(torch.Tensor)`
+            shape is (bs, response_length)
+    """
+    scores = token_level_rewards.sum(dim=-1)
+
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        
+        for idx in id2score:
+            group_scores = id2score[idx]
+            if len(group_scores) == 1:
+                id2mean[idx] = torch.tensor(0.0, device=scores.device)
+                id2std[idx] = torch.tensor(1.0, device=scores.device)
+            elif len(group_scores) > 1:
+                scores_tensor = torch.stack(group_scores)
+                max_reward_tensor = torch.full(
+                    (add_max_reward_num,), 
+                    max_reward, 
+                    dtype=scores_tensor.dtype, 
+                    device=scores_tensor.device
+                )
+                augmented_scores = torch.cat([scores_tensor, max_reward_tensor])
+                id2mean[idx] = torch.mean(augmented_scores)
+                id2std[idx] = torch.std(augmented_scores)
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        
+        for i in range(bsz):
+            if norm_adv_by_std_in_grpo:
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            else:
+                scores[i] = scores[i] - id2mean[index[i]]
+        
+        scores = scores.unsqueeze(-1) * response_mask
+
+    return scores, scores
