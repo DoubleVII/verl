@@ -1568,11 +1568,8 @@ def compute_ngrpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
-    epsilon: float = 1e-6,
-    norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
-    max_reward: float = 1.0,
-    add_max_reward_num: int = 1,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for NGRPO, operating only on Outcome reward
@@ -1588,16 +1585,8 @@ def compute_ngrpo_outcome_advantage(
             shape is (bs, response_length)
         index: `(np.ndarray)`
             index array for grouping
-        epsilon: `(float)`
-            small value to avoid division by zero
-        norm_adv_by_std_in_grpo: `(bool)`
-            whether to scale the advantage by std
         config: `(Optional[AlgoConfig])`
             algorithm configuration object
-        max_reward: `(float)`
-            the setting of max reward for the task (default: 1.0)
-        add_max_reward_num: `(int)`
-            number of virtual max-reward samples to add (default: 1)
 
     Note:
         If norm_adv_by_std_in_grpo is True, the advantage is scaled by the std.
@@ -1609,6 +1598,13 @@ def compute_ngrpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
+    if config is None:
+        config = AlgoConfig()
+    epsilon = config.get("epsilon", 1e-6)
+    norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", True)
+    max_reward = config.get("max_reward", 1.0)
+    add_max_reward_num = config.get("add_max_reward_num", 1)
+
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
