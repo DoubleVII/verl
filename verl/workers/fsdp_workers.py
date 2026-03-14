@@ -2384,3 +2384,174 @@ class VHeadRewardModelWorker(RewardModelWorker):
             batch_scores = values.gather(dim=-1, index=idx).squeeze(-1).tolist()
             results.extend(float(s) for s in batch_scores)
         return results
+
+
+class SelfRewardActorRolloutRefWorker(ActorRolloutRefWorker):
+    """
+    Self-reward worker where policy model evaluates its own rollouts.
+    
+    This worker combines actor, rollout, and reward model functionality into one.
+    Since policy and reward share the same model, we skip the model offload/load
+    cycle between rollout and reward phases, saving significant time.
+    """
+    def __init__(self, config: DictConfig, role: str, reward_model_config: DictConfig = None, **kwargs):
+        super().__init__(config, role=role, **kwargs)
+        
+        # Use reward_model_config for custom_processor if provided
+        self.reward_model_config = reward_model_config
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        """Initialize model for self-reward worker."""
+        super().init_model()
+        self._init_custom_processor()
+
+    def _init_custom_processor(self):
+        """Initialize custom processor for reward computation."""
+        # Get custom_processor from reward_model_config if available, else from main config
+        config = self.reward_model_config if self.reward_model_config else self.config
+        if config.get("custom_processor", None):
+            processor_cls = load_extern_type(
+                config.custom_processor.path, 
+                config.custom_processor.name
+            )
+            self.custom_processor = processor_cls(
+                config=config, 
+                tokenizer=self.tokenizer, 
+                input_tokenizer=self.tokenizer
+            )
+        else:
+            self.custom_processor = None
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
+    @DistProfiler.annotate(color="red", role="rollout_generate")
+    def generate_sequences(self, prompts: DataProto):
+        """Generate sequences without switching to trainer mode after.
+        
+        In self-reward mode, we keep the model in rollout mode since
+        compute_rm_score will be called next.
+        """
+        assert self._is_rollout
+        prompts = prompts.to(get_device_id())
+
+        meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id
+            if self.generation_config is not None
+            else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id
+            if self.generation_config is not None
+            else self.tokenizer.pad_token_id,
+        }
+        prompts.meta_info.update(meta_info)
+
+        timing_generate = {}
+        if self._is_actor:
+            loop = get_event_loop()
+            loop.run_until_complete(self.rollout_mode())
+            log_gpu_memory_usage("After switch to rollout mode", logger=logger)
+
+        with simple_timer("generate_sequences", timing_generate):
+            output = self.rollout.generate_sequences(prompts=prompts)
+
+        # NOTE: Do NOT call trainer_mode() here - we stay in rollout mode
+        # for the subsequent compute_rm_score call
+
+        timing_generate_topk_ratio, timing_generate_min, timing_generate_max = topk_reduce_ratio_min_max(
+            timing_generate["generate_sequences"]
+        )
+        timing_generate = reduce_timing(timing_generate)
+        timing_generate.update(
+            {
+                "generation_timing/max": timing_generate_max,
+                "generation_timing/min": timing_generate_min,
+                "generation_timing/topk_ratio": timing_generate_topk_ratio,
+            }
+        )
+        output.meta_info["timing"] = timing_generate
+        output = output.to("cpu")
+
+        get_torch_device().empty_cache()
+        return output
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
+    @DistProfiler.annotate(color="brown", role="reward_generate")
+    def compute_rm_score(self, data: DataProto):
+        """Compute reward scores without switching modes.
+        
+        In self-reward mode, the model is already in rollout mode from
+        generate_sequences, so we skip the rollout_mode() call.
+        """
+        data = data.to(get_device_id())
+
+        meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id
+            if self.generation_config is not None
+            else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id
+            if self.generation_config is not None
+            else self.tokenizer.pad_token_id,
+        }
+        data.meta_info.update(meta_info)
+
+        if not self.custom_processor or not hasattr(self.custom_processor, "compute_scores"):
+            raise NotImplementedError("Please provide a custom_processor with compute_scores method.")
+
+        timing_generate = {}
+
+        # NOTE: Do NOT call rollout_mode() here - model is already in rollout mode
+        # from generate_sequences
+
+        # TODO: update sampling params
+        with simple_timer("generate_rewards", timing_generate), self.rollout.update_sampling_params(detokenize=True):
+            generate_fn = functools.partial(
+                self.rollout.inference_engine.generate,
+                sampling_params=self.rollout.sampling_params,
+                use_tqdm=False,
+            )
+            reward_scores = self.custom_processor.compute_scores(
+                data,
+                generate_fn,
+            )
+        if not isinstance(reward_scores, torch.Tensor):
+            reward_tensor = torch.tensor(reward_scores, dtype=torch.float32)
+        else:
+            reward_tensor = reward_scores
+
+        # Now switch back to trainer mode after reward computation
+        if self._is_actor:
+            loop = get_event_loop()
+            loop.run_until_complete(self.trainer_mode())
+            log_gpu_memory_usage("After switch to trainer mode", logger=logger)
+
+        timing_generate_topk_ratio, timing_generate_min, timing_generate_max = topk_reduce_ratio_min_max(
+            timing_generate["generate_rewards"]
+        )
+        timing_generate = reduce_timing(timing_generate)
+        timing_generate.update(
+            {
+                "reward_timing/max": timing_generate_max,
+                "reward_timing/min": timing_generate_min,
+                "reward_timing/topk_ratio": timing_generate_topk_ratio,
+            }
+        )
+
+        token_level_scores = self._expand_to_token_level(data, reward_tensor)
+        output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
+        output = output.to("cpu")
+
+        get_torch_device().empty_cache()
+        return output
+
+    def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
+        """Expand scalar scores to token-level scores."""
+        batch_size = data.batch.batch_size[0]
+        attention_mask = data.batch["attention_mask"]
+        position_ids = data.batch["position_ids"]
+        response_length = data.batch["responses"].shape[-1]
+        if position_ids.dim() == 3:
+            position_ids = position_ids[:, 0, :]
+        eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)
+        token_level_scores = torch.zeros_like(attention_mask, dtype=scores.dtype)
+        token_level_scores[torch.arange(batch_size), eos_mask_idx] = scores.to(device=token_level_scores.device)
+        token_level_scores = token_level_scores[:, -response_length:]
+        return token_level_scores

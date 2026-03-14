@@ -679,14 +679,30 @@ class RayPPOTrainer:
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
+        # Check if using SelfReward strategy - policy and reward share the same worker
+        self.use_self_reward = (
+            self.use_rm
+            and hasattr(self.config.reward_model, "strategy")
+            and self.config.reward_model.strategy == "SelfReward"
+        )
+
         # create actor and rollout
         if self.hybrid_engine:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
-            actor_rollout_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.ActorRollout],
-                config=self.config.actor_rollout_ref,
-                role=str(Role.ActorRollout),
-            )
+            # For SelfReward, pass reward_model config for custom_processor
+            if self.use_self_reward:
+                actor_rollout_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.ActorRollout],
+                    config=self.config.actor_rollout_ref,
+                    role=str(Role.ActorRollout),
+                    reward_model_config=self.config.reward_model,
+                )
+            else:
+                actor_rollout_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.ActorRollout],
+                    config=self.config.actor_rollout_ref,
+                    role=str(Role.ActorRollout),
+                )
             self.resource_pool_to_cls[resource_pool][str(Role.ActorRollout)] = actor_rollout_cls
         else:
             raise NotImplementedError
@@ -709,7 +725,9 @@ class RayPPOTrainer:
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
         # create a reward model if reward_fn is None
-        if self.use_rm:
+        # For SelfReward strategy, we skip creating a separate RM worker
+        # as it shares the same worker with ActorRollout
+        if self.use_rm and not self.use_self_reward:
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
             rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model, actor_config=self.config.actor_rollout_ref)
@@ -758,12 +776,21 @@ class RayPPOTrainer:
         self.rm_wg = None
         # initalization of rm_wg will be deprecated in the future
         if self.use_rm:
-            self.rm_wg = all_wg[str(Role.RewardModel)]
-            self.rm_wg.init_model()
+            if self.use_self_reward:
+                # For SelfReward, rm_wg points to the same worker as actor_rollout_wg
+                # We need to initialize actor_rollout_wg first, then point rm_wg to it
+                pass  # Will be set after actor_rollout_wg is initialized
+            else:
+                self.rm_wg = all_wg[str(Role.RewardModel)]
+                self.rm_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg[str(Role.ActorRollout)]
         self.actor_rollout_wg.init_model()
+
+        # For SelfReward, set rm_wg to point to actor_rollout_wg after initialization
+        if self.use_self_reward:
+            self.rm_wg = self.actor_rollout_wg
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False

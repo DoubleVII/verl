@@ -121,7 +121,14 @@ class TaskRunner:
         """Add actor rollout worker based on the actor strategy."""
         from verl.single_controller.ray import RayWorkerGroup
 
-        if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
+        if config.reward_model.enable and config.reward_model.strategy == "SelfReward":
+            from verl.workers.fsdp_workers import SelfRewardActorRolloutRefWorker
+
+            assert config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}, f"SelfReward only supports fsdp and fsdp2 actor strategy. Current strategy: {config.actor_rollout_ref.actor.strategy}"
+
+            actor_rollout_cls = SelfRewardActorRolloutRefWorker
+            ray_worker_group_cls = RayWorkerGroup
+        elif config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
             from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
             actor_rollout_cls = (
@@ -203,6 +210,20 @@ class TaskRunner:
         from verl.trainer.ppo.ray_trainer import Role
 
         if config.reward_model.enable:
+            # For SelfReward strategy, we don't add a separate RewardModel worker
+            # because it shares the same worker with ActorRollout
+            if config.reward_model.strategy == "SelfReward":
+                # The SelfRewardActorRolloutRefWorker is already added in add_actor_rollout_worker
+                # Just add the role mapping for resource pool
+                if config.reward_model.enable_resource_pool:
+                    raise ValueError("SelfReward strategy does not support separate resource pool.")
+                else:
+                    self.mapping[Role.RewardModel] = "global_pool"
+                # Also add to role_worker_mapping so need_reward_model returns True
+                # But use the same worker class as ActorRollout
+                self.role_worker_mapping[Role.RewardModel] = self.role_worker_mapping[Role.ActorRollout]
+                return
+
             use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
             if use_legacy_worker_impl in ["auto", "enable"]:
                 if config.reward_model.strategy in {"fsdp", "fsdp2"}:

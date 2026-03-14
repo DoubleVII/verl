@@ -1,5 +1,9 @@
-
 from typing import Optional, List, Dict, Tuple, Iterable
+
+try:
+    from .language_detector import is_language_match
+except ImportError:
+    from reward_utils.language_detector import is_language_match
 
 
 def _line_extractor(response: str) -> Optional[str]:
@@ -63,10 +67,6 @@ def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[
             raise ValueError(f"extractor_type: {extractor_type}")
 
         response_list.append(extracted)
-
-        # if i == 0:
-        #     # for debugging purpose
-        #     print(f"Decode response. response: {response}")
 
     return response_list
 
@@ -199,24 +199,19 @@ def _group_validate_ranking(text: str, expected_num: int) -> bool:
     except Exception:
         return False
 
-def _group_ranking_to_scores(order: str) -> Dict[str, int]:
-    tiers = []
-    for group in order.split('>'):
-        tier = [x.strip() for x in group.split('=')]
-        tiers.append(tier)
-    base = len(tiers)
-    score_map: Dict[str, int] = {}
+def _group_ranking_to_scores(ranking_text: str) -> Dict[str, int]:
+    tiers = ranking_text.split('>')
+    score_map = {}
+    max_score = len(tiers) - 1
     for i, tier in enumerate(tiers):
-        val = base - i
-        for ident in tier:
-            score_map[ident] = val
+        for cid in tier.split('='):
+            score_map[cid.strip()] = max_score - i
     return score_map
 
-def _group_parse_score_text(last_line: str) -> Optional[Dict[str, int]]:
+def _group_parse_score_text(score_text: str) -> Optional[Dict[str, int]]:
     try:
-        items = [x.strip() for x in last_line.split(',') if x.strip()]
-        result: Dict[str, int] = {}
-        for it in items:
+        result = {}
+        for it in score_text.split(','):
             k, v = it.split(':')
             result[k.strip()] = int(v.strip())
         return result
@@ -281,6 +276,9 @@ class RewardModelProcessor:
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
         self.default_reward = getattr(self.config, "default_reward", 0.0)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
+        self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
+        if self.enable_language_detection:
+            print(f"Language detection enabled")
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -300,6 +298,10 @@ class RewardModelProcessor:
             if mt_text is None:
                 filtered_indices.append(idx)
                 continue
+            if self.enable_language_detection:
+                if not is_language_match(mt_text, tgt_lang):
+                    filtered_indices.append(idx)
+                    continue
             prompt = single_get_prompt(src_text, mt_text, src_lang, tgt_lang)
             messages = [
                 {"role": "user", "content": prompt},
@@ -317,11 +319,11 @@ class RewardModelProcessor:
         total_size = len(src_text_list)
         return prompt_list, kept_indices, total_size
     
-    def process_output(self, outputs, data, kept_indices, total_size) -> list[float|int]:
+    def process_output(self, outputs, data, kept_indices, total_size) -> List[float]:
         final_scores: list[float] = [self.default_reward] * total_size
         for j, output in enumerate(outputs):
-            output_text = output.outputs[0].text
-            score = single_extract_score(output_text)
+            text = output.outputs[0].text
+            score = single_extract_score(text)
             if score is None:
                 score = self.default_reward
             else:
@@ -337,15 +339,14 @@ class RewardModelProcessor:
                     valid_len_int = resp_len
                 penalty = _compute_overlong_penalty(valid_len_int, self.overlong_buffer_cfg)
                 score = score - penalty
-            if j < len(kept_indices):
                 final_scores[kept_indices[j]] = score
 
-        # filtered indices remain 0
+        # filtered indices remain default_reward
         return final_scores
 
     def compute_scores(self, data, generate_fn):
-        prompts, kept_indices, total_size = self.process_input(data)
-        outputs = generate_fn(prompts)
+        prompt_list, kept_indices, total_size = self.process_input(data)
+        outputs = generate_fn(prompt_list)
         return self.process_output(outputs, data, kept_indices, total_size)
 
 
@@ -362,6 +363,9 @@ class GroupRewardModelProcessor:
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
         self.default_reward = getattr(self.config, "default_reward", 0.0)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
+        self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
+        if self.enable_language_detection:
+            print(f"Language detection enabled")
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -403,6 +407,10 @@ class GroupRewardModelProcessor:
                 if t is None:
                     invalid_indices.append(idx)
                     continue
+                if self.enable_language_detection:
+                    if not is_language_match(t, extra[indices[0]]["trg_lang"] if "trg_lang" in extra[indices[0]] else extra[indices[0]]["lang_pair"].split("-")[1]):
+                        invalid_indices.append(idx)
+                        continue
                 if t in seen:
                     dup_map[seen[t]].append(idx)
                 else:
@@ -509,6 +517,9 @@ class SeedXRewardModelProcessor:
         self.score_lower_bound = getattr(self.config, "score_lower_bound", -10000.0)
         self.score_upper_bound = getattr(self.config, "score_upper_bound", 10000.0)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
+        self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
+        if self.enable_language_detection:
+            print(f"Language detection enabled")
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -530,6 +541,10 @@ class SeedXRewardModelProcessor:
             if mt_text is None:
                 filtered_indices.append(idx)
                 continue
+            if self.enable_language_detection:
+                if not is_language_match(mt_text, tgt_lang):
+                    filtered_indices.append(idx)
+                    continue
             prompt = _seedx_build_prompt(src_text, mt_text, src_lang, tgt_lang)
             ids_len = (
                 len(self.tokenizer.encode(prompt))
@@ -585,6 +600,9 @@ class VHeadRewardModelProcessor:
         self.score_lower_bound = getattr(self.config, "score_lower_bound", -10000.0)
         self.score_upper_bound = getattr(self.config, "score_upper_bound", 10000.0)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
+        self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
+        if self.enable_language_detection:
+            print(f"Language detection enabled")
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
@@ -603,6 +621,10 @@ class VHeadRewardModelProcessor:
             if mt_text is None:
                 filtered_indices.append(idx)
                 continue
+            if self.enable_language_detection:
+                if not is_language_match(mt_text, tgt_lang):
+                    filtered_indices.append(idx)
+                    continue
             full_text = _vanilla_rm_build_prompt(self.tokenizer, src_lang, tgt_lang, src_text, mt_text, chat_template=self.chat_template)
             ids_len = len(self.tokenizer.encode(full_text))
             if ids_len > self.max_prompt_length:
@@ -714,3 +736,300 @@ def batch_bleurt_reward_fn(
     for j, idx in enumerate(kept_idx):
         final_scores[idx] = float(scores_list[j]) * float(score_scale_factor)
     return final_scores
+
+
+class MultiTaskSelfRewardProcessor:
+    """
+    Multi-task processor for SelfReward strategy.
+    
+    Supports two task types:
+    1. Translation task: Uses generative reward model (GroupRewardModelProcessor logic)
+    2. Ranking task: Uses rule-based scoring (ranking_score_reward_fn)
+    
+    Data is routed based on `data.non_tensor_batch["ability"]` field:
+    - "translation": Uses GroupRewardModelProcessor for generative scoring
+    - "ranking": Uses ranking_score_reward_fn for rule-based scoring
+    """
+    
+    def __init__(self, *args, **kwargs):
+        self.config = kwargs.get("config")
+        self.tokenizer = kwargs.get("tokenizer", None)
+        self.input_tokenizer = kwargs.get("input_tokenizer", self.tokenizer)
+        
+        if self.tokenizer is None:
+            raise ValueError("tokenizer must be provided")
+        if self.input_tokenizer is None:
+            raise ValueError("input_tokenizer must be provided")
+        
+        self.max_prompt_length = self.config.prompt_length
+        self.extractor_type = self.config.custom_processor.get("extractor_type", "line")
+        print(f"Using extractor_type: {self.extractor_type}")
+        
+        self.prompt_type = getattr(self.config, "group_prompt_type", "ranking_score")
+        self.add_example = getattr(self.config, "group_add_example", False)
+        score_scale_factor  = getattr(self.config, "score_scale_factor", 1.0)
+        self.mt_score_scale_factor = getattr(self.config, "mt_score_scale_factor", score_scale_factor)
+        self.default_reward = getattr(self.config, "default_reward", 0.0)
+        self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
+        self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
+        if self.enable_language_detection:
+            print(f"Language detection enabled")
+        
+        self.ranking_score_scale_factor = getattr(self.config, "ranking_score_scale_factor", score_scale_factor)
+        
+        print(f"MultiTaskSelfRewardProcessor initialized with prompt_type={self.prompt_type}, "
+              f"mt_score_scale_factor={self.mt_score_scale_factor}, ranking_score_scale_factor={self.ranking_score_scale_factor}")
+
+    def _split_by_ability(self, data) -> Tuple[List[int], List[int]]:
+        """
+        Split data indices by ability type.
+        
+        Returns:
+            translation_indices: Indices for translation task
+            ranking_indices: Indices for ranking task
+        """
+        abilities = data.non_tensor_batch.get("ability", None)
+        if abilities is None:
+            raise ValueError("ability not found in data.non_tensor_batch")
+        
+        translation_indices = []
+        ranking_indices = []
+        
+        for idx, ability in enumerate(abilities):
+            ability_str = str(ability).strip().lower()
+            if ability_str == "translation":
+                translation_indices.append(idx)
+            elif ability_str == "ranking":
+                ranking_indices.append(idx)
+            else:
+                print(f"Warning: Unknown ability type '{ability}' at index {idx}, treating as translation")
+                translation_indices.append(idx)
+        
+        return translation_indices, ranking_indices
+
+    def _group_indices(self, uids: List, indices: List[int]) -> List[Tuple[str, List[int]]]:
+        """
+        Group indices by uid, only considering indices in the provided list.
+        """
+        groups: Dict[str, List[int]] = {}
+        for idx in indices:
+            key = str(uids[idx])
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(idx)
+        return list(groups.items())
+
+    def _process_translation_task(self, data, translation_indices: List[int], generate_fn) -> Dict[int, float]:
+        """
+        Process translation task using GroupRewardModelProcessor logic.
+        
+        Returns:
+            Dict mapping index to score
+        """
+        if not translation_indices:
+            return {}
+        
+        responses = _decode_response(data, self.input_tokenizer, self.extractor_type)
+        extra = data.non_tensor_batch["extra_info"]
+        uids = data.non_tensor_batch.get("uid", None)
+        if uids is None:
+            raise ValueError("uid not found in batch for translation task")
+        
+        groups = self._group_indices(list(uids), translation_indices)
+        
+        prompt_list: List[Dict[str, List[int]]] = []
+        kept_groups: List[Dict] = []
+        zero_groups: List[List[int]] = []
+
+        bad_lang_count = 0
+        
+        for uid_key, indices in groups:
+            src_text = extra[indices[0]]["src_text"]
+            src_lang, tgt_lang = _get_lang_pair(extra[indices[0]])
+            if len(src_lang) == 2:
+                src_lang = LANG_MAP[src_lang]
+            if len(tgt_lang) == 2:
+                tgt_lang = LANG_MAP[tgt_lang]
+            
+            seen: Dict[str, int] = {}
+            unique_texts: List[str] = []
+            dup_map: List[List[int]] = []
+            invalid_indices: List[int] = []
+            
+            for idx in indices:
+                t = responses[idx]
+                if t is None:
+                    invalid_indices.append(idx)
+                    continue
+                if self.enable_language_detection:
+                    if not is_language_match(t, extra[indices[0]]["trg_lang"] if "trg_lang" in extra[indices[0]] else extra[indices[0]]["lang_pair"].split("-")[1]):
+                        invalid_indices.append(idx)
+                        bad_lang_count += 1
+                        continue
+                if t in seen:
+                    dup_map[seen[t]].append(idx)
+                else:
+                    seen[t] = len(unique_texts)
+                    unique_texts.append(t)
+                    dup_map.append([idx])
+            
+            valid_indices = [i for i in indices if i not in invalid_indices]
+            
+            if len(unique_texts) <= 1:
+                if valid_indices:
+                    zero_groups.append(valid_indices)
+                for inv in invalid_indices:
+                    zero_groups.append([inv])
+                continue
+            
+            prompt = group_get_prompt(src_lang, tgt_lang, src_text, unique_texts, self.prompt_type, add_example=self.add_example)
+            messages = [{"role": "user", "content": prompt}]
+            input_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            raw_ids = self.tokenizer.encode(input_text, add_special_tokens=False)
+            
+            if len(raw_ids) > self.max_prompt_length:
+                if valid_indices:
+                    zero_groups.append(valid_indices)
+                for inv in invalid_indices:
+                    zero_groups.append([inv])
+                continue
+            
+            candidate_lens: List[int] = []
+            for targets in dup_map:
+                first_idx = targets[0]
+                response_ids = data.batch["responses"][first_idx]
+                resp_len = response_ids.shape[-1]
+                valid_len = data.batch["attention_mask"][first_idx][-resp_len:].sum()
+                try:
+                    candidate_lens.append(int(valid_len))
+                except Exception:
+                    candidate_lens.append(resp_len)
+            
+            kept_groups.append({"uid": [uid_key], "dup_map": dup_map, "candidate_lens": candidate_lens})
+            prompt_list.append({"prompt_token_ids": raw_ids})
+        
+        scores_dict: Dict[int, float] = {}
+
+        if self.enable_language_detection:
+            print(f"[DEBUG] Bad lang count: {bad_lang_count}/{len(translation_indices)}")
+        
+        if prompt_list:
+            outputs = generate_fn(prompt_list)
+            
+            for j, output in enumerate(outputs):
+                text = output.outputs[0].text
+                group_info = kept_groups[j]
+                dup_map = group_info["dup_map"]
+                candidate_lens = group_info.get("candidate_lens", [0] * len(dup_map))
+                scores = group_extract_scores(text, self.prompt_type, len(dup_map))
+                if scores is None:
+                    scores = [self.default_reward] * len(dup_map)
+                normalized = [s * self.mt_score_scale_factor for s in scores]
+                for k, targets in enumerate(dup_map):
+                    penalty = _compute_overlong_penalty(candidate_lens[k], self.overlong_buffer_cfg)
+                    sc = normalized[k] - penalty
+                    for idx in targets:
+                        scores_dict[idx] = sc
+        
+        for indices in zero_groups:
+            for idx in indices:
+                scores_dict[idx] = self.default_reward
+        
+        return scores_dict
+
+    def _process_ranking_task(self, data, ranking_indices: List[int]) -> Dict[int, float]:
+        """
+        Process ranking task using ranking_score_reward_fn.
+        
+        Returns:
+            Dict mapping index to score
+        """
+        if not ranking_indices:
+            return {}
+        
+        try:
+            from reward_utils.ranking_score_reward import ranking_score_reward_fn
+        except ImportError:
+            from .ranking_score_reward import ranking_score_reward_fn
+        
+        scores_dict: Dict[int, float] = {}
+        
+        for idx in ranking_indices:
+            response_ids = data.batch["responses"][idx]
+            response_length = response_ids.shape[-1]
+            valid_response_length = data.batch["attention_mask"][idx][-response_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
+            
+            solution_str = self.input_tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+            solution_str = solution_str.replace(self.input_tokenizer.eos_token, "")
+            
+            ground_truth = None
+            if "reward_model" in data.non_tensor_batch:
+                reward_model_data = data.non_tensor_batch["reward_model"]
+                if isinstance(reward_model_data, dict) and "ground_truth" in reward_model_data:
+                    ground_truth = reward_model_data["ground_truth"]
+                elif hasattr(reward_model_data, "__getitem__"):
+                    try:
+                        ground_truth = reward_model_data[idx].get("ground_truth") if isinstance(reward_model_data[idx], dict) else reward_model_data[idx]
+                    except (IndexError, KeyError, TypeError):
+                        pass
+            
+            if ground_truth is None:
+                print("[Warning] empty ground truth!")
+                scores_dict[idx] = self.default_reward
+                continue
+            
+            data_source = data.non_tensor_batch.get("data_source", [""] * len(ranking_indices))
+            if isinstance(data_source, (list, tuple)):
+                data_source = data_source[idx] if idx < len(data_source) else ""
+            
+            extra_info = data.non_tensor_batch.get("extra_info", None)
+            if extra_info is not None and hasattr(extra_info, "__getitem__"):
+                try:
+                    extra_info = extra_info[idx]
+                except (IndexError, KeyError, TypeError):
+                    extra_info = None
+            
+            reward_result = ranking_score_reward_fn(
+                data_source=data_source,
+                solution_str=solution_str,
+                ground_truth=ground_truth,
+                extra_info=extra_info,
+                score_scale_factor=self.ranking_score_scale_factor,
+            )
+            
+            scores_dict[idx] = reward_result.get("score", self.default_reward)
+        
+        return scores_dict
+
+    def compute_scores(self, data, generate_fn):
+        """
+        Compute scores for all samples by routing to appropriate task processors.
+        
+        Args:
+            data: DataProto containing batch data
+            generate_fn: Function to generate responses (used for translation task)
+        
+        Returns:
+            List of scores for all samples
+        """
+        total_size = data.batch.batch_size[0]
+        translation_indices, ranking_indices = self._split_by_ability(data)
+        
+        
+        final_scores: List[float] = [self.default_reward] * total_size
+        
+        translation_scores = self._process_translation_task(data, translation_indices, generate_fn)
+        for idx, score in translation_scores.items():
+            final_scores[idx] = score
+        
+        ranking_scores = self._process_ranking_task(data, ranking_indices)
+        for idx, score in ranking_scores.items():
+            final_scores[idx] = score
+
+        avg_translation_score = sum(translation_scores.values())/len(translation_scores)
+        avg_ranking_score = sum(ranking_scores.values())/len(ranking_scores)
+        print(f"MultiTaskSelfRewardProcessor: {total_size} total, {len(translation_indices)} translation samples, avg score ({avg_translation_score}); "
+              f"{len(ranking_indices)} ranking samples, avg score ({avg_ranking_score}).")
+        
+        return final_scores
