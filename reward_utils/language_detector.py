@@ -29,6 +29,8 @@ class LanguageDetector:
         if LINGUA_AVAILABLE:
             languages = [lang for lang in LANG_MAP_TO_LINGUA.values() if lang is not None]
             self._detector = LanguageDetectorBuilder.from_languages(*languages).build()
+        else:
+            raise ImportError("lingua is not installed, cannot use language detector")
     
     def is_language_match(self, text: str, target_lang_code: str) -> bool:
         if not LINGUA_AVAILABLE or self._detector is None:
