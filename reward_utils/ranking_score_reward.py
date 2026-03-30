@@ -328,6 +328,43 @@ def ranking_score_reward_fn_no_cot(
     return reward_out
 
 
+def ranking_reward_fn_no_cot_ranking_score_response(
+    data_source, 
+    solution_str, 
+    ground_truth: Union[str, dict], 
+    extra_info=None,
+    score_scale_factor: float = 1.0,
+):
+    assert not ground_truth.strip().startswith("{")
+    reward_out = {"score": 0, "valid_answer": 0, "ranking_reward": 0}
+
+    solution_str = solution_str.strip()
+    if solution_str.count("\n") != 1:
+        return reward_out
+    ranking_text, score_text = solution_str.split("\n")
+
+    pred_score_dict = _parse_score_text(score_text)
+    if pred_score_dict is None:
+        return reward_out
+
+    pred_score_to_rank = _score_to_rank(pred_score_dict)
+    # Use unscaled score for internal consistency check
+    consistency_check = ranking_reward_fn_no_cot(
+        data_source, ranking_text, pred_score_to_rank, extra_info, score_scale_factor=1.0
+    )
+    if consistency_check["score"] != 1:
+        return reward_out
+
+    # validation
+    if not validate_ranking(pred_score_to_rank, ground_truth):
+        return reward_out
+
+    ranking_reward = compare_orderings(pred_score_to_rank, ground_truth)
+    reward_out["score"] = float(ranking_reward) * float(score_scale_factor)
+    reward_out["valid_answer"] = 1
+    reward_out["ranking_reward"] = ranking_reward
+    return reward_out
+
 def ranking_score_reward_fn(
     data_source, 
     solution_str, 
@@ -352,6 +389,12 @@ def ranking_score_reward_fn(
         return reward_out
     
     no_cot_solution_str = f"{ranking_text}\n{score_text}"
-    return ranking_score_reward_fn_no_cot(
-        data_source, no_cot_solution_str, ground_truth, extra_info, score_scale_factor=score_scale_factor
-    )
+
+    if ground_truth.strip().startswith("{"):
+        return ranking_score_reward_fn_no_cot(
+            data_source, no_cot_solution_str, ground_truth, extra_info, score_scale_factor=score_scale_factor
+        )
+    else:
+        return ranking_reward_fn_no_cot_ranking_score_response(
+            data_source, no_cot_solution_str, ground_truth, extra_info, score_scale_factor=score_scale_factor
+        )
