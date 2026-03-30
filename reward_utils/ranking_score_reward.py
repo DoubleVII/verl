@@ -336,7 +336,9 @@ def ranking_reward_fn_no_cot_ranking_score_response(
     score_scale_factor: float = 1.0,
 ):
     assert not ground_truth.strip().startswith("{")
-    reward_out = {"score": 0, "valid_answer": 0, "ranking_reward": 0}
+
+    # set score_reward=0 to be compatible with ranking_score_reward_fn
+    reward_out = {"score": 0, "valid_answer": 0, "ranking_reward": 0, "score_reward": 0}
 
     solution_str = solution_str.strip()
     if solution_str.count("\n") != 1:
