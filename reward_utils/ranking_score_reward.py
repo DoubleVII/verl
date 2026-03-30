@@ -114,6 +114,30 @@ def ranking_reward_fn_no_cot(
         "valid_answer": 1,
     }
 
+def ranking_reward_fn_no_cot_multi_ref(
+    data_source, 
+    solution_str, 
+    ground_truth, 
+    extra_info=None,
+    score_scale_factor: float = 1.0,
+):
+    """
+    ranking reward function for no cot (direct ranking prediction) with multiple references.
+    """
+    ground_truths = ground_truth.split("\n")
+    result = {
+        "score": 0,
+        "valid_answer": 0,
+    }
+    for ground_truth in ground_truths:
+        temp_result = ranking_reward_fn_no_cot(
+            data_source, solution_str, ground_truth, extra_info, score_scale_factor=score_scale_factor
+        )
+        if temp_result["score"] > result["score"]:
+            result = temp_result
+    return result
+
+
 
 def ranking_reward_fn_zero(
     data_source, 
@@ -167,7 +191,7 @@ def ranking_reward_fn(
     if len(cot_text) == 0:
         return {"score": 0, "valid_answer": 0}
     
-    return ranking_reward_fn_no_cot(
+    return ranking_reward_fn_no_cot_multi_ref(
         data_source, solution_str, ground_truth, extra_info, score_scale_factor=score_scale_factor
     )
 
