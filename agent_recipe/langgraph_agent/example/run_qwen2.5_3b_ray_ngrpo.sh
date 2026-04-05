@@ -32,14 +32,14 @@ test_files="['${DATA_DIR}/test.parquet']"
 # Check if dataset exists, if not create it
 if [ ! -f "${DATA_DIR}/train.parquet" ]; then
     echo "Dataset not found, creating..."
-    python recipe/langgraph_agent/example/create_dataset.py \
+    python agent_recipe/langgraph_agent/example/create_dataset.py \
         --train_size 5000 \
         --test_size 500 \
         --output_dir ${DATA_DIR}
 fi
 
 # Agent config
-agent_loop_config_path=recipe/langgraph_agent/example/agent.yaml
+agent_loop_config_path=agent_recipe/langgraph_agent/example/agent.yaml
 
 # =================== wandb ===================
 # Project settings

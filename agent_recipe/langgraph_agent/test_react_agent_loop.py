@@ -19,7 +19,7 @@ import pytest
 import ray
 from langchain_core.tools import tool
 from omegaconf import DictConfig
-from recipe.langgraph_agent.react_agent_loop import ReactAgentLoop
+from agent_recipe.langgraph_agent.react_agent_loop import ReactAgentLoop
 from tests.experimental.agent_loop.agent_utils import init_agent_loop_manager
 
 from verl.protocol import DataProto
@@ -111,7 +111,7 @@ def test_react_agent(init_config):
     # =========================== 1. Init rollout manager ===========================
     agent_loop_config = [
         {
-            "_target_": "recipe.langgraph_agent.test_react_agent_loop.TestReactAgentLoop",
+            "_target_": "agent_recipe.langgraph_agent.test_react_agent_loop.TestReactAgentLoop",
             "name": "react_agent",
         },
     ]

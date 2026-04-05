@@ -35,19 +35,19 @@ class MathExpressionReactAgentLoop(ReactAgentLoop):
 We can define agent loop config in yaml file, which will be used by AgentLoopWorker to dynamic load custom AgentLoop class.
 ```yaml
 - name: math_expression
-  _target_: recipe.langgraph_agent.example.math_expression.MathExpressionReactAgentLoop
+  _target_: agent_recipe.langgraph_agent.example.math_expression.MathExpressionReactAgentLoop
 ```
 
 ### Prepare dataset
 Now, let's prepare two small datasets for training and evaluation:
 ```bash
-python recipe/langgraph_agent/example/create_dataset.py
+python agent_recipe/langgraph_agent/example/create_dataset.py
 ```
 
 - Parameters: `--train_size` (default: 5000), `--test_size` (default: 500), `--output_dir` (default: `data/math_expression_tool`).
 - Example with custom sizes/output:
 ```bash
-python recipe/langgraph_agent/example/create_dataset.py \
+python agent_recipe/langgraph_agent/example/create_dataset.py \
   --train_size 10000 \
   --test_size 1000 \
   --output_dir data/math_expression_tool
@@ -71,12 +71,12 @@ Generated math expressions are like below, requiring model to call `calculate` m
 ### Training
 Hook all these up and start training:
 ```bash
-bash recipe/langgraph_agent/example/run_qwen2.5_3b.sh 2>&1 | tee train.log
+bash agent_recipe/langgraph_agent/example/run_qwen2.5_3b.sh 2>&1 | tee train.log
 ```
 
 To submit on a SLURM cluster (the script contains SBATCH headers):
 ```bash
-sbatch recipe/langgraph_agent/example/run_qwen2.5_3b.sh
+sbatch agent_recipe/langgraph_agent/example/run_qwen2.5_3b.sh
 ```
 
 **Note on `GPUS_PER_NODE` and `NNODES`:**
@@ -89,7 +89,7 @@ sbatch recipe/langgraph_agent/example/run_qwen2.5_3b.sh
 
 Local override (no `SLURM_*` set):
 ```bash
-GPUS_PER_NODE=4 NNODES=2 bash recipe/langgraph_agent/example/run_qwen2.5_3b.sh
+GPUS_PER_NODE=4 NNODES=2 bash agent_recipe/langgraph_agent/example/run_qwen2.5_3b.sh
 ```
 
 After total 39 steps, model should achieve 100% accuray on test dataset:

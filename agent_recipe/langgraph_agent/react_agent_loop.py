@@ -26,7 +26,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
-from recipe.langgraph_agent.chat_model import (
+from agent_recipe.langgraph_agent.chat_model import (
     ChatModel,
     MaxTokenExceededError,
     convert_to_agent_output,

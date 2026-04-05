@@ -39,7 +39,7 @@ train_files=$DATA_ROOT/data/math_expression_tool/train.parquet
 test_files=$DATA_ROOT/data/math_expression_tool/test.parquet
 
 # Agent config
-agent_loop_config_path=recipe/langgraph_agent/example/agent.yaml
+agent_loop_config_path=agent_recipe/langgraph_agent/example/agent.yaml
 
 # =================== wandb ===================
 project_name=math_expression_tool
