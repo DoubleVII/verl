@@ -5,3 +5,7 @@
 	path = agent_recipe/langgraph_mt_agent/MT-tools
 	url = https://github.com/DoubleVII/MT-tools.git
 	branch = main
+[submodule "agent_recipe/langgraph_mt_agent/MT_tools"]
+	path = agent_recipe/langgraph_mt_agent/MT_tools
+	url = https://github.com/DoubleVII/MT-tools.git
+	branch = main
