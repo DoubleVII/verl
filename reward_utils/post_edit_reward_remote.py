@@ -132,8 +132,8 @@ async def group_post_edit_score_reward_fn(
     reward_scale: float = 1.0,
     prompt_format: str = "ranking_score",
     add_example: bool = False,
-    rm_model_name: str = "default",
-    rm_max_tokens: int = 4096,
+    rm_model_name: str = None,
+    rm_max_tokens: int = 8192,
     rm_retry: int = 2,
     enable_language_detection: bool = False,
 ) -> dict:
@@ -239,11 +239,13 @@ def batch_group_post_edit_score_reward_fn(
     reward_scale: float = 1.0,
     prompt_format: str = "ranking_score",
     add_example: bool = False,
-    rm_model_name: str = "default",
-    rm_max_tokens: int = 4096,
+    rm_model_name: str = None,
+    rm_max_tokens: int = 8192,
     rm_retry: int = 2,
     enable_language_detection: bool = False,
 ) -> list[dict]:
+    if rm_model_name is None:
+        raise ValueError("rm_model_name must be provided.")
     async def _run_all():
         tasks = [
             group_post_edit_score_reward_fn(
