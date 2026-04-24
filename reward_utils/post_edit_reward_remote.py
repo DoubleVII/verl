@@ -135,6 +135,7 @@ async def group_post_edit_score_reward_fn(
     rm_model_name: str = "default",
     rm_max_tokens: int = 4096,
     rm_retry: int = 2,
+    enable_language_detection: bool = False,
 ) -> dict:
     reward_out = {"score": default_reward, "valid_answer": 0, "pt_mt_score": 0, "baseline_score": 0}
     pe_mt_text = extract_mt(solution_str, extractor_type)
@@ -148,12 +149,22 @@ async def group_post_edit_score_reward_fn(
     src_lang = extra_info.get("src_lang", "English")
     trg_lang = extra_info.get("trg_lang", "Chinese")
 
+    # language detection check
+    if enable_language_detection:
+        try:
+            from reward_utils.language_detector import is_language_match
+        except ImportError:
+            from .language_detector import is_language_match
+        if not is_language_match(pe_mt_text, trg_lang):
+            return reward_out
+
     # truncate baselines to respect rm_max_candidates
     if 1 + len(mt_texts) > rm_max_candidates:
         mt_texts = mt_texts[: rm_max_candidates - 1]
 
-    # pe_mt is always candidate "A"
-    all_mt_texts = [pe_mt_text] + mt_texts
+    # pe_mt is placed last to avoid order bias in the reward model
+    all_mt_texts = mt_texts + [pe_mt_text]
+    pe_mt_index = len(all_mt_texts) - 1
     num_candidates = len(all_mt_texts)
 
     if num_candidates < 2:
@@ -198,8 +209,8 @@ async def group_post_edit_score_reward_fn(
         return reward_out
 
     # compute relative reward
-    pe_mt_score = scores[0]
-    baseline_scores = scores[1:]
+    pe_mt_score = scores[pe_mt_index]
+    baseline_scores = scores[:pe_mt_index]
     mean_all = sum(scores) / len(scores)
     relative_reward = pe_mt_score - mean_all
     final_reward = reward_scale * relative_reward
@@ -231,6 +242,7 @@ def batch_group_post_edit_score_reward_fn(
     rm_model_name: str = "default",
     rm_max_tokens: int = 4096,
     rm_retry: int = 2,
+    enable_language_detection: bool = False,
 ) -> list[dict]:
     async def _run_all():
         tasks = [
@@ -252,6 +264,7 @@ def batch_group_post_edit_score_reward_fn(
                 rm_model_name=rm_model_name,
                 rm_max_tokens=rm_max_tokens,
                 rm_retry=rm_retry,
+                enable_language_detection=enable_language_detection,
             )
             for i in range(len(solution_strs))
         ]
