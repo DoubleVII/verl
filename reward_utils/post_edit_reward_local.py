@@ -123,6 +123,7 @@ async def group_post_edit_score_reward_fn(
     ground_truth: str,
     extra_info: dict,
     reward_router_address: str = None,
+    reward_model_tokenizer = None,
     rm_max_candidates: int = 4,
     rm_sampling_temp: float = 1,
     rm_sampling_top_p: float = 1,
