@@ -609,7 +609,9 @@ class vLLMHttpServer:
             # clear encoder cache: https://github.com/vllm-project/vllm/pull/33452
             # await self.engine.reset_encoder_cache()
         elif self.rollout_mode == RolloutMode.COLOCATED:
-            await self.engine.sleep(level=1)
+            from verl.third_party.vllm import VLLM_SLEEP_LEVEL
+
+            await self.engine.sleep(level=VLLM_SLEEP_LEVEL)
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
 
