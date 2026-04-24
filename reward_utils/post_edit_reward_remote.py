@@ -136,6 +136,7 @@ async def group_post_edit_score_reward_fn(
     rm_max_tokens: int = 8192,
     rm_retry: int = 2,
     enable_language_detection: bool = False,
+    rm_timeout: float = 60.0,
 ) -> dict:
     reward_out = {"score": default_reward, "valid_answer": 0, "pt_mt_score": 0, "baseline_score": 0}
     pe_mt_text = extract_mt(solution_str, extractor_type)
@@ -182,7 +183,7 @@ async def group_post_edit_score_reward_fn(
     )
 
     # call vLLM with retry
-    client = openai.AsyncOpenAI(base_url=api_base_url, api_key=api_key)
+    client = openai.AsyncOpenAI(base_url=api_base_url, api_key=api_key, timeout=rm_timeout)
     messages = [{"role": "user", "content": prompt}]
 
     scores = None
@@ -243,6 +244,7 @@ def batch_group_post_edit_score_reward_fn(
     rm_max_tokens: int = 8192,
     rm_retry: int = 2,
     enable_language_detection: bool = False,
+    rm_timeout: float = 60.0,
 ) -> list[dict]:
     if rm_model_name is None:
         raise ValueError("rm_model_name must be provided.")
@@ -267,6 +269,7 @@ def batch_group_post_edit_score_reward_fn(
                 rm_max_tokens=rm_max_tokens,
                 rm_retry=rm_retry,
                 enable_language_detection=enable_language_detection,
+                rm_timeout=rm_timeout,
             )
             for i in range(len(solution_strs))
         ]
