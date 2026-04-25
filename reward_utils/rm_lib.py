@@ -1,6 +1,47 @@
 from typing import Optional, List, Dict, Tuple, Iterable
 
 try:
+    from .helpers import (
+        _line_extractor,
+        _block_extractor,
+        _one_line_extractor,
+        _decode_response,
+        _get_lang_pair,
+        group_extract_scores,
+        _compute_overlong_penalty,
+    )
+except ImportError:
+    from reward_utils.helpers import (
+        _line_extractor,
+        _block_extractor,
+        _one_line_extractor,
+        _decode_response,
+        _get_lang_pair,
+        group_extract_scores,
+        _compute_overlong_penalty,
+    )
+
+try:
+    from .config import LANG_MAP
+except ImportError:
+    from reward_utils.config import LANG_MAP
+
+try:
+    from .prompts import (
+        single_get_prompt,
+        group_get_prompt,
+        _seedx_build_prompt,
+        _vanilla_rm_build_prompt,
+    )
+except ImportError:
+    from reward_utils.prompts import (
+        single_get_prompt,
+        group_get_prompt,
+        _seedx_build_prompt,
+        _vanilla_rm_build_prompt,
+    )
+
+try:
     from .language_detector import is_language_match
 except ImportError:
     from reward_utils.language_detector import is_language_match
@@ -10,122 +51,6 @@ try:
 except ImportError:
     from reward_utils.post_edit_reward_remote import get_GQM_with_notes_prompt
 
-
-def _line_extractor(response: str) -> Optional[str]:
-    response = response.strip()
-    if not response:
-        return None
-    last = response.split("\n")[-1].strip()
-    if not last:
-        return None
-    return last
-
-def _block_extractor(response: str) -> Optional[str]:
-    response = response.strip()
-    if response.count("```") != 2:
-        return None
-    if not response:
-        return None
-    if not response.endswith("```"):
-        return None
-    response = response[:-3]
-    block_start = response.rfind("```")
-    if block_start == -1:
-        return None
-    extract_out = response[block_start + 3 :].strip()
-    if not extract_out:
-        return None
-    return extract_out
-
-
-def _one_line_extractor(response: str) -> Optional[str]:
-    response = response.strip()
-    if not response:
-        return None
-    if "\n" in response:
-        return None
-    return response
-    
-
-def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[Optional[str]]:
-    response_list: List[Optional[str]] = []
-
-    for i in range(data.batch.batch_size[0]):
-        # extract response
-        response_ids = data.batch["responses"][i]
-        response_length = response_ids.shape[-1]
-        valid_response_length = data.batch["attention_mask"][i][-response_length:].sum()
-        valid_response_ids = response_ids[:valid_response_length]
-
-        # decode
-        response = src_tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-        response = response.replace(src_tokenizer.eos_token, "")
-        if extractor_type == "line":
-            extracted = _line_extractor(response)
-        elif extractor_type == "codeblock":
-            extracted = _block_extractor(response)
-        elif extractor_type == "oneline":
-            extracted = _one_line_extractor(response)
-        elif extractor_type == "none":
-            extracted = response.strip()
-        else:
-            raise ValueError(f"extractor_type: {extractor_type}")
-
-        response_list.append(extracted)
-
-    return response_list
-
-
-def _get_lang_pair(extra_info: dict) -> tuple:
-    """
-    extra_info: str, e.g. "en-zh"
-    """
-    if "src_lang" in extra_info and "trg_lang" in extra_info:
-        src_lang = extra_info["src_lang"]
-        tgt_lang = extra_info["trg_lang"]
-    elif "lang_pair" in extra_info:
-        src_lang, tgt_lang = extra_info["lang_pair"].split("-")
-    else:
-        raise ValueError(f"extra_info: {extra_info}")
-    return src_lang, tgt_lang
-
-LANG_MAP = {
-    "en": "English",
-    "zh": "Chinese",
-    "de": "German",
-    "ru": "Russian",
-    "ko": "Korean",
-    "ja": "Japanese",
-    "fr": "French",
-    "es": "Spanish",
-    "pt": "Portuguese",
-    "it": "Italian",
-    "nl": "Dutch",
-    "th": "Thai",
-    "ro": "Romanian",
-    "ar": "Arabic",
-    "el": "Greek",
-    "vi": "Vietnamese",
-}
-
-
-promt_template = """Given a source text in {} and a translation text in {}. Perform a step by step analysis of translation quality and assign a score on a scale from 0 to 10.
-Source text:
-```
-{}
-```
-
-Translation text:
-```
-{}
-```
-"""
-def single_get_prompt(src_text, mt_text, src_lang, tgt_lang):
-    if len(src_lang) == 2:
-        src_lang = LANG_MAP[src_lang]
-    if len(tgt_lang) == 2:
-        tgt_lang = LANG_MAP[tgt_lang]
-    return promt_template.format(src_lang, tgt_lang, src_text, mt_text)
 
 def single_extract_score(output_text: str) -> Optional[float]:
     output_text = output_text.strip()
@@ -138,139 +63,8 @@ def single_extract_score(output_text: str) -> Optional[float]:
         return None
 
 
-CANDIDATE_IDENTIFIERS = [
-    "A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z"
-]
-
-GROUP_TASK_FORMAT = {
-    "score": "Finally, score the candidates with integer scores on a scale from 0 to 10.",
-    "ranking": "Finally, rank the candidates in order of quality from best to worst.",
-    "ranking_score": "Finally, rank and score the candidates with integer scores on a scale from 0 to 10.",
-}
-
-GROUP_OUTPUT_EXAMPLE = {
-    "score": "Output the scores on the last line, for example: `A: 4, B: 9, C: 7, D: 9`.",
-    "ranking": "Output the rankings in descending order on the last line, for example: `B > A = D > C`.",
-    "ranking_score": "At the end section, first output the rankings in descending order, for example: `B > A = D > C`. Then, on the last line, output the scores, for example: `B: 9, A: 7, D: 7, C: 2`.",
-}
-
-GROUP_PROMPT_TEMPLATE = """Given a source text in {} and multiple translation candidates in {}. Perform a step by step analysis and comparison of the translation quality for the candidates. {}
-
-Source text:
-```
-{}
-```
-
-{}"""
-
-CANDIDATE_PROMPT = """Translation {}:
-```
-{}
-```
-"""
-
-def _group_get_task_prompt(prompt_format: str, add_example: bool = False) -> str:
-    if prompt_format not in GROUP_TASK_FORMAT:
-        raise ValueError(f"prompt_format must be one of {GROUP_TASK_FORMAT.keys()}")
-    task_prompt = GROUP_TASK_FORMAT[prompt_format]
-    if add_example:
-        task_prompt += f" {GROUP_OUTPUT_EXAMPLE[prompt_format]}"
-    return task_prompt
-
-def group_get_prompt(source_lang: str, target_lang: str, source_text: str, mt_texts: List[str], prompt_format: str, add_example: bool = False) -> str:
-    if len(mt_texts) == 1:
-        raise ValueError("Only support multiple candidates.")
-    if len(mt_texts) > len(CANDIDATE_IDENTIFIERS):
-        raise ValueError(f"Only support {len(CANDIDATE_IDENTIFIERS)} candidates.")
-    task_prompt = _group_get_task_prompt(prompt_format, add_example)
-    candidate_prompts = "".join([CANDIDATE_PROMPT.format(CANDIDATE_IDENTIFIERS[i], mt_texts[i]) for i in range(len(mt_texts))])
-    return GROUP_PROMPT_TEMPLATE.format(source_lang, target_lang, task_prompt, source_text, candidate_prompts)
-
-def _group_validate_ranking(text: str, expected_num: int) -> bool:
-    try:
-        if "<" in text:
-            return False
-        tiers = []
-        for group in text.split('>'):
-            tier = set(x.strip() for x in group.split('='))
-            tiers.append(tier)
-        count = sum(len(t) for t in tiers)
-        if count != expected_num:
-            return False
-        for cid in CANDIDATE_IDENTIFIERS[:expected_num]:
-            if text.count(cid) != 1:
-                return False
-        return True
-    except Exception:
-        return False
-
-def _group_ranking_to_scores(ranking_text: str) -> Dict[str, int]:
-    tiers = ranking_text.split('>')
-    score_map = {}
-    max_score = len(tiers) - 1
-    for i, tier in enumerate(tiers):
-        for cid in tier.split('='):
-            score_map[cid.strip()] = max_score - i
-    return score_map
-
-def _group_parse_score_text(score_text: str) -> Optional[Dict[str, int]]:
-    try:
-        result = {}
-        for it in score_text.split(','):
-            k, v = it.split(':')
-            result[k.strip()] = int(v.strip())
-        return result
-    except Exception:
-        return None
-
-def group_extract_scores(output_text: str, prompt_type: str, expected_num: int) -> Optional[List[int]]:
-    output_text = output_text.strip()
-    try:
-        if "\n" not in output_text:
-            last_line = output_text
-        else:
-            idx = output_text.rfind("\n")
-            last_line = output_text[idx:].strip()
-        if prompt_type == "score":
-            scores = [int(s.strip().split(":")[-1]) for s in last_line.split(",")]
-            if len(scores) != expected_num:
-                return None
-            return scores
-        if prompt_type == "ranking":
-            if not _group_validate_ranking(last_line, expected_num):
-                return None
-            score_map = _group_ranking_to_scores(last_line)
-            scores = [score_map[cid] for cid in CANDIDATE_IDENTIFIERS[:expected_num]]
-            return scores
-        if prompt_type == "ranking_score":
-            score_dict = _group_parse_score_text(last_line)
-            if score_dict is None:
-                return None
-            scores = [score_dict[cid] for cid in CANDIDATE_IDENTIFIERS[:expected_num]]
-            return scores
-        raise ValueError(f"prompt_type must be one of {GROUP_TASK_FORMAT.keys()}")
-    except Exception:
-        return None
-
-def _compute_overlong_penalty(length: int, overlong_buffer_cfg: Optional[Dict]) -> float:
-    if not overlong_buffer_cfg:
-        return 0.0
-    if not overlong_buffer_cfg.get("enable", False):
-        return 0.0
-    max_resp_len = overlong_buffer_cfg.get("max_resp_len", None)
-    buffer_len = overlong_buffer_cfg.get("len", 0)
-    penalty_factor = overlong_buffer_cfg.get("penalty_factor", 0.0)
-    if max_resp_len is None or buffer_len <= 0 or penalty_factor <= 0.0:
-        return 0.0
-    threshold = max_resp_len - buffer_len
-    if length <= threshold:
-        return 0.0
-    delta = length - threshold
-    if delta >= buffer_len:
-        return penalty_factor
-    return penalty_factor * (delta / buffer_len)
-
 class RewardModelProcessor:
+    """Single-translation generative RM: prompts the RM to score each translation individually."""
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
         self.tokenizer = kwargs.get("tokenizer", None)
@@ -294,7 +88,7 @@ class RewardModelProcessor:
         src_text_list = [item["src_text"] for item in data.non_tensor_batch["extra_info"]]
         lang_pair_list = [_get_lang_pair(item) for item in data.non_tensor_batch["extra_info"]]
         src_langs, tgt_langs = zip(*lang_pair_list)
-        
+
         assert len(src_text_list) == len(response_list) == len(src_langs) == len(tgt_langs)
         prompt_list = []
         kept_indices = []
@@ -323,7 +117,7 @@ class RewardModelProcessor:
             prompt_list.append({"prompt_token_ids": raw_prompt_ids})
         total_size = len(src_text_list)
         return prompt_list, kept_indices, total_size
-    
+
     def process_output(self, outputs, data, kept_indices, total_size) -> List[float]:
         final_scores: list[float] = [self.default_reward] * total_size
         for j, output in enumerate(outputs):
@@ -356,6 +150,7 @@ class RewardModelProcessor:
 
 
 class GroupRewardModelProcessor:
+    """Group generative RM: ranks/scores multiple translations of the same source via a single LLM call."""
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
         self.tokenizer = kwargs.get("tokenizer", None)
@@ -481,36 +276,8 @@ class GroupRewardModelProcessor:
         return self.process_output(outputs, kept_groups, zero_groups, total_size)
 
 
-
-
-
-
-
-def _seedx_build_prompt(src_text: str, mt_text: str, src_lang: str, trg_lang: str) -> str:
-    src_display = LANG_MAP[src_lang] if len(src_lang) == 2 and src_lang in LANG_MAP else src_lang
-    trg_display = LANG_MAP[trg_lang] if len(trg_lang) == 2 and trg_lang in LANG_MAP else trg_lang
-    trg_tag = f" <{trg_lang}>" if len(trg_lang) == 2 else ""
-    prompt = (
-        f"Translate the following {src_display} sentence into {trg_display}:\n"
-        f"{src_text}{trg_tag}"
-    )
-    return prompt
-
-
-def _vanilla_rm_build_prompt(tokenizer, src_lang: str, trg_lang: str, src_text: str, mt_text: str, chat_template: bool = True) -> str:
-    src_display = LANG_MAP[src_lang] if len(src_lang) == 2 and src_lang in LANG_MAP else src_lang
-    trg_display = LANG_MAP[trg_lang] if len(trg_lang) == 2 and trg_lang in LANG_MAP else trg_lang
-    prompt = f"Translate the following text from {src_display} into {trg_display}:\n{src_display}: {src_text}\n{trg_display}:"
-    if chat_template:
-        messages = [{"role": "user", "content": prompt}]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    else:
-        prompt += " "
-    full_prompt = f"{prompt}{mt_text}{tokenizer.eos_token}"
-    return full_prompt
-
-
 class SeedXRewardModelProcessor:
+    """SeedX-style RM: scores translations using a SeedX-format prompt and a separate score generation step."""
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
         self.tokenizer = kwargs.get("tokenizer", None)
@@ -593,6 +360,7 @@ class SeedXRewardModelProcessor:
 
 
 class VHeadRewardModelProcessor:
+    """Value-head RM: scores translations by feeding prompt+response through the model's value head."""
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
         self.tokenizer = kwargs.get("tokenizer", None)
@@ -667,9 +435,8 @@ class VHeadRewardModelProcessor:
         return self.score_postprocess(scores)
 
 
-
-
 class GroupPostEditRewardProcessor:
+    """Post-edit RM: scores a candidate MT against baseline MTs using GQM prompts, returns relative reward."""
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
         self.tokenizer = kwargs.get("tokenizer", None)
@@ -791,6 +558,7 @@ def batch_bleurt_reward_fn(
     extractor_type: str = "line",
     score_scale_factor: float = 1.0,
 ):
+    """Score translations against references using BLEURT-20."""
     assert extra_infos is not None
     assert (
         isinstance(data_sources, Iterable)
@@ -851,32 +619,22 @@ def batch_bleurt_reward_fn(
 
 
 class MultiTaskSelfRewardProcessor:
-    """
-    Multi-task processor for SelfReward strategy.
-    
-    Supports two task types:
-    1. Translation task: Uses generative reward model (GroupRewardModelProcessor logic)
-    2. Ranking task: Uses rule-based scoring (ranking_score_reward_fn)
-    
-    Data is routed based on `data.non_tensor_batch["ability"]` field:
-    - "translation": Uses GroupRewardModelProcessor for generative scoring
-    - "ranking": Uses ranking_score_reward_fn for rule-based scoring
-    """
-    
+    """Routes samples to translation (generative RM) or ranking (rule-based) scoring based on the 'ability' field."""
+
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
         self.tokenizer = kwargs.get("tokenizer", None)
         self.input_tokenizer = kwargs.get("input_tokenizer", self.tokenizer)
-        
+
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
         if self.input_tokenizer is None:
             raise ValueError("input_tokenizer must be provided")
-        
+
         self.max_prompt_length = self.config.prompt_length
         self.extractor_type = self.config.custom_processor.get("extractor_type", "line")
         print(f"Using extractor_type: {self.extractor_type}")
-        
+
         self.prompt_type = getattr(self.config, "group_prompt_type", "ranking_score")
         self.add_example = getattr(self.config, "group_add_example", False)
         score_scale_factor  = getattr(self.config, "score_scale_factor", 1.0)
@@ -886,27 +644,20 @@ class MultiTaskSelfRewardProcessor:
         self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
         if self.enable_language_detection:
             print(f"Language detection enabled")
-        
+
         self.ranking_score_scale_factor = getattr(self.config, "ranking_score_scale_factor", score_scale_factor)
-        
+
         print(f"MultiTaskSelfRewardProcessor initialized with prompt_type={self.prompt_type}, "
               f"mt_score_scale_factor={self.mt_score_scale_factor}, ranking_score_scale_factor={self.ranking_score_scale_factor}")
 
     def _split_by_ability(self, data) -> Tuple[List[int], List[int]]:
-        """
-        Split data indices by ability type.
-        
-        Returns:
-            translation_indices: Indices for translation task
-            ranking_indices: Indices for ranking task
-        """
         abilities = data.non_tensor_batch.get("ability", None)
         if abilities is None:
             raise ValueError("ability not found in data.non_tensor_batch")
-        
+
         translation_indices = []
         ranking_indices = []
-        
+
         for idx, ability in enumerate(abilities):
             ability_str = str(ability).strip().lower()
             if ability_str == "translation":
@@ -916,13 +667,10 @@ class MultiTaskSelfRewardProcessor:
             else:
                 print(f"Warning: Unknown ability type '{ability}' at index {idx}, treating as translation")
                 translation_indices.append(idx)
-        
+
         return translation_indices, ranking_indices
 
     def _group_indices(self, uids: List, indices: List[int]) -> List[Tuple[str, List[int]]]:
-        """
-        Group indices by uid, only considering indices in the provided list.
-        """
         groups: Dict[str, List[int]] = {}
         for idx in indices:
             key = str(uids[idx])
@@ -932,29 +680,23 @@ class MultiTaskSelfRewardProcessor:
         return list(groups.items())
 
     def _process_translation_task(self, data, translation_indices: List[int], generate_fn) -> Dict[int, float]:
-        """
-        Process translation task using GroupRewardModelProcessor logic.
-        
-        Returns:
-            Dict mapping index to score
-        """
         if not translation_indices:
             return {}
-        
+
         responses = _decode_response(data, self.input_tokenizer, self.extractor_type)
         extra = data.non_tensor_batch["extra_info"]
         uids = data.non_tensor_batch.get("uid", None)
         if uids is None:
             raise ValueError("uid not found in batch for translation task")
-        
+
         groups = self._group_indices(list(uids), translation_indices)
-        
+
         prompt_list: List[Dict[str, List[int]]] = []
         kept_groups: List[Dict] = []
         zero_groups: List[List[int]] = []
 
         bad_lang_count = 0
-        
+
         for uid_key, indices in groups:
             src_text = extra[indices[0]]["src_text"]
             src_lang, tgt_lang = _get_lang_pair(extra[indices[0]])
@@ -962,12 +704,12 @@ class MultiTaskSelfRewardProcessor:
                 src_lang = LANG_MAP[src_lang]
             if len(tgt_lang) == 2:
                 tgt_lang = LANG_MAP[tgt_lang]
-            
+
             seen: Dict[str, int] = {}
             unique_texts: List[str] = []
             dup_map: List[List[int]] = []
             invalid_indices: List[int] = []
-            
+
             for idx in indices:
                 t = responses[idx]
                 if t is None:
@@ -984,28 +726,28 @@ class MultiTaskSelfRewardProcessor:
                     seen[t] = len(unique_texts)
                     unique_texts.append(t)
                     dup_map.append([idx])
-            
+
             valid_indices = [i for i in indices if i not in invalid_indices]
-            
+
             if len(unique_texts) <= 1:
                 if valid_indices:
                     zero_groups.append(valid_indices)
                 for inv in invalid_indices:
                     zero_groups.append([inv])
                 continue
-            
+
             prompt = group_get_prompt(src_lang, tgt_lang, src_text, unique_texts, self.prompt_type, add_example=self.add_example)
             messages = [{"role": "user", "content": prompt}]
             input_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             raw_ids = self.tokenizer.encode(input_text, add_special_tokens=False)
-            
+
             if len(raw_ids) > self.max_prompt_length:
                 if valid_indices:
                     zero_groups.append(valid_indices)
                 for inv in invalid_indices:
                     zero_groups.append([inv])
                 continue
-            
+
             candidate_lens: List[int] = []
             for targets in dup_map:
                 first_idx = targets[0]
@@ -1016,18 +758,18 @@ class MultiTaskSelfRewardProcessor:
                     candidate_lens.append(int(valid_len))
                 except Exception:
                     candidate_lens.append(resp_len)
-            
+
             kept_groups.append({"uid": [uid_key], "dup_map": dup_map, "candidate_lens": candidate_lens})
             prompt_list.append({"prompt_token_ids": raw_ids})
-        
+
         scores_dict: Dict[int, float] = {}
 
         if self.enable_language_detection:
             print(f"[DEBUG] Bad lang count: {bad_lang_count}/{len(translation_indices)}")
-        
+
         if prompt_list:
             outputs = generate_fn(prompt_list)
-            
+
             for j, output in enumerate(outputs):
                 text = output.outputs[0].text
                 group_info = kept_groups[j]
@@ -1042,39 +784,33 @@ class MultiTaskSelfRewardProcessor:
                     sc = normalized[k] - penalty
                     for idx in targets:
                         scores_dict[idx] = sc
-        
+
         for indices in zero_groups:
             for idx in indices:
                 scores_dict[idx] = self.default_reward
-        
+
         return scores_dict
 
     def _process_ranking_task(self, data, ranking_indices: List[int]) -> Dict[int, float]:
-        """
-        Process ranking task using ranking_score_reward_fn.
-        
-        Returns:
-            Dict mapping index to score
-        """
         if not ranking_indices:
             return {}
-        
+
         try:
             from reward_utils.ranking_score_reward import ranking_score_reward_fn
         except ImportError:
             from .ranking_score_reward import ranking_score_reward_fn
-        
+
         scores_dict: Dict[int, float] = {}
-        
+
         for idx in ranking_indices:
             response_ids = data.batch["responses"][idx]
             response_length = response_ids.shape[-1]
             valid_response_length = data.batch["attention_mask"][idx][-response_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
-            
+
             solution_str = self.input_tokenizer.decode(valid_response_ids, skip_special_tokens=True)
             solution_str = solution_str.replace(self.input_tokenizer.eos_token, "")
-            
+
             ground_truth = None
             if "reward_model" in data.non_tensor_batch:
                 reward_model_data = data.non_tensor_batch["reward_model"]
@@ -1085,23 +821,23 @@ class MultiTaskSelfRewardProcessor:
                         ground_truth = reward_model_data[idx].get("ground_truth") if isinstance(reward_model_data[idx], dict) else reward_model_data[idx]
                     except (IndexError, KeyError, TypeError):
                         pass
-            
+
             if ground_truth is None:
                 print("[Warning] empty ground truth!")
                 scores_dict[idx] = self.default_reward
                 continue
-            
+
             data_source = data.non_tensor_batch.get("data_source", [""] * len(ranking_indices))
             if isinstance(data_source, (list, tuple)):
                 data_source = data_source[idx] if idx < len(data_source) else ""
-            
+
             extra_info = data.non_tensor_batch.get("extra_info", None)
             if extra_info is not None and hasattr(extra_info, "__getitem__"):
                 try:
                     extra_info = extra_info[idx]
                 except (IndexError, KeyError, TypeError):
                     extra_info = None
-            
+
             reward_result = ranking_score_reward_fn(
                 data_source=data_source,
                 solution_str=solution_str,
@@ -1109,32 +845,21 @@ class MultiTaskSelfRewardProcessor:
                 extra_info=extra_info,
                 score_scale_factor=self.ranking_score_scale_factor,
             )
-            
+
             scores_dict[idx] = reward_result.get("score", self.default_reward)
-        
+
         return scores_dict
 
     def compute_scores(self, data, generate_fn):
-        """
-        Compute scores for all samples by routing to appropriate task processors.
-        
-        Args:
-            data: DataProto containing batch data
-            generate_fn: Function to generate responses (used for translation task)
-        
-        Returns:
-            List of scores for all samples
-        """
         total_size = data.batch.batch_size[0]
         translation_indices, ranking_indices = self._split_by_ability(data)
-        
-        
+
         final_scores: List[float] = [self.default_reward] * total_size
-        
+
         translation_scores = self._process_translation_task(data, translation_indices, generate_fn)
         for idx, score in translation_scores.items():
             final_scores[idx] = score
-        
+
         ranking_scores = self._process_ranking_task(data, ranking_indices)
         for idx, score in ranking_scores.items():
             final_scores[idx] = score
@@ -1143,5 +868,5 @@ class MultiTaskSelfRewardProcessor:
         avg_ranking_score = sum(ranking_scores.values())/len(ranking_scores)
         print(f"MultiTaskSelfRewardProcessor: {total_size} total, {len(translation_indices)} translation samples, avg score ({avg_translation_score}); "
               f"{len(ranking_indices)} ranking samples, avg score ({avg_ranking_score}).")
-        
+
         return final_scores

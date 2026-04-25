@@ -335,4 +335,4 @@ MT_TEST_DATA_META_INFO = {
 }
 
 
-candidate_identifiers = ["A", "B", "C", "D", "E", "F", "G", "H"]
+candidate_identifiers = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
