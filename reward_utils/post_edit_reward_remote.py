@@ -245,34 +245,38 @@ def batch_group_post_edit_score_reward_fn(
     rm_retry: int = 2,
     enable_language_detection: bool = False,
     rm_timeout: float = 60.0,
+    max_concurrent: int = 8,
 ) -> list[dict]:
     if rm_model_name is None:
         raise ValueError("rm_model_name must be provided.")
     async def _run_all():
-        tasks = [
-            group_post_edit_score_reward_fn(
-                data_source=data_sources[i],
-                solution_str=solution_strs[i],
-                ground_truth=ground_truths[i],
-                extra_info=extra_infos[i],
-                api_base_url=api_base_url,
-                api_key=api_key,
-                rm_max_candidates=rm_max_candidates,
-                rm_sampling_temp=rm_sampling_temp,
-                rm_sampling_top_p=rm_sampling_top_p,
-                extractor_type=extractor_type,
-                default_reward=default_reward,
-                reward_scale=reward_scale,
-                prompt_format=prompt_format,
-                add_example=add_example,
-                rm_model_name=rm_model_name,
-                rm_max_tokens=rm_max_tokens,
-                rm_retry=rm_retry,
-                enable_language_detection=enable_language_detection,
-                rm_timeout=rm_timeout,
-            )
-            for i in range(len(solution_strs))
-        ]
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def _bounded(i):
+            async with sem:
+                return await group_post_edit_score_reward_fn(
+                    data_source=data_sources[i],
+                    solution_str=solution_strs[i],
+                    ground_truth=ground_truths[i],
+                    extra_info=extra_infos[i],
+                    api_base_url=api_base_url,
+                    api_key=api_key,
+                    rm_max_candidates=rm_max_candidates,
+                    rm_sampling_temp=rm_sampling_temp,
+                    rm_sampling_top_p=rm_sampling_top_p,
+                    extractor_type=extractor_type,
+                    default_reward=default_reward,
+                    reward_scale=reward_scale,
+                    prompt_format=prompt_format,
+                    add_example=add_example,
+                    rm_model_name=rm_model_name,
+                    rm_max_tokens=rm_max_tokens,
+                    rm_retry=rm_retry,
+                    enable_language_detection=enable_language_detection,
+                    rm_timeout=rm_timeout,
+                )
+
+        tasks = [_bounded(i) for i in range(len(solution_strs))]
         return await asyncio.gather(*tasks, return_exceptions=True)
 
     loop = asyncio.new_event_loop()
