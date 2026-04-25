@@ -5,6 +5,11 @@ try:
 except ImportError:
     from reward_utils.language_detector import is_language_match
 
+try:
+    from .post_edit_reward_remote import get_GQM_with_notes_prompt
+except ImportError:
+    from reward_utils.post_edit_reward_remote import get_GQM_with_notes_prompt
+
 
 def _line_extractor(response: str) -> Optional[str]:
     response = response.strip()
@@ -662,6 +667,113 @@ class VHeadRewardModelProcessor:
         return self.score_postprocess(scores)
 
 
+
+
+class GroupPostEditRewardProcessor:
+    def __init__(self, *args, **kwargs):
+        self.config = kwargs.get("config")
+        self.tokenizer = kwargs.get("tokenizer", None)
+        self.input_tokenizer = kwargs.get("input_tokenizer", self.tokenizer)
+        self.max_prompt_length = self.config.prompt_length
+        self.extractor_type = self.config.custom_processor.get("extractor_type", "codeblock")
+        print(f"Using extractor_type: {self.extractor_type}")
+        self.prompt_format = getattr(self.config, "group_prompt_type", "ranking_score")
+        self.add_example = getattr(self.config, "group_add_example", False)
+        self.reward_scale = getattr(self.config, "reward_scale", 1.0)
+        self.default_reward = getattr(self.config, "default_reward", -1.0)
+        self.rm_max_candidates = getattr(self.config, "rm_max_candidates", 4)
+        self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
+        self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
+        self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
+        if self.enable_language_detection:
+            print(f"Language detection enabled")
+        if self.tokenizer is None:
+            raise ValueError("tokenizer must be provided")
+        if self.input_tokenizer is None:
+            raise ValueError("input_tokenizer must be provided")
+
+    def process_input(self, data):
+        responses = _decode_response(data, self.input_tokenizer, self.extractor_type)
+        extra_info_list = data.non_tensor_batch["extra_info"]
+        total_size = len(responses)
+
+        prompt_list: List[Dict[str, List[int]]] = []
+        kept_info: List[Dict] = []
+        for idx in range(total_size):
+            pe_mt_text = responses[idx]
+            if pe_mt_text is None:
+                continue
+
+            extra = extra_info_list[idx]
+            src_lang, tgt_lang = _get_lang_pair(extra)
+
+            if self.enable_language_detection:
+                if not is_language_match(pe_mt_text, tgt_lang):
+                    continue
+
+            src_text = extra.get("src_text", "")
+            mt_texts = extra.get("mt_texts", [])
+            notes = extra.get("notes", None)
+
+            if 1 + len(mt_texts) > self.rm_max_candidates:
+                mt_texts = mt_texts[: self.rm_max_candidates - 1]
+
+            all_mt_texts = mt_texts + [pe_mt_text]
+            num_candidates = len(all_mt_texts)
+            if num_candidates < 2:
+                continue
+
+            prompt = get_GQM_with_notes_prompt(
+                source_lang=src_lang,
+                target_lang=tgt_lang,
+                source_text=src_text,
+                mt_texts=all_mt_texts,
+                prompt_format=self.prompt_format,
+                add_example=self.add_example,
+                notes=notes,
+            )
+            messages = [{"role": "user", "content": prompt}]
+            input_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            raw_ids = self.tokenizer.encode(input_text, add_special_tokens=False)
+
+            if len(raw_ids) > self.max_prompt_length:
+                continue
+
+            response_ids = data.batch["responses"][idx]
+            resp_len = response_ids.shape[-1]
+            valid_len = data.batch["attention_mask"][idx][-resp_len:].sum()
+            try:
+                candidate_len = int(valid_len)
+            except Exception:
+                candidate_len = resp_len
+
+            kept_info.append({"orig_idx": idx, "num_candidates": num_candidates, "response_len": candidate_len})
+            prompt_list.append({"prompt_token_ids": raw_ids})
+
+        return prompt_list, kept_info, total_size
+
+    def process_output(self, outputs, kept_info, total_size) -> List[float]:
+        final_scores: List[float] = [self.default_reward] * total_size
+        for j, output in enumerate(outputs):
+            text = output.outputs[0].text
+            info = kept_info[j]
+            num_candidates = info["num_candidates"]
+            orig_idx = info["orig_idx"]
+            scores = group_extract_scores(text, self.prompt_format, num_candidates)
+            if scores is None:
+                final_scores[orig_idx] = self.default_reward
+                continue
+            pe_mt_score = scores[-1]
+            mean_all = sum(scores) / len(scores)
+            relative_reward = (pe_mt_score - mean_all) * self.score_scale_factor
+            penalty = _compute_overlong_penalty(info["response_len"], self.overlong_buffer_cfg)
+            final_scores[orig_idx] = relative_reward * self.reward_scale - penalty
+        return final_scores
+
+    def compute_scores(self, data, generate_fn):
+        prompt_list, kept_info, total_size = self.process_input(data)
+        outputs = generate_fn(prompt_list)
+        return self.process_output(outputs, kept_info, total_size)
 
 
 def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
