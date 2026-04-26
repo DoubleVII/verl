@@ -23,7 +23,11 @@ def _block_extractor(response: str) -> Optional[str]:
     block_start = response.rfind("```")
     if block_start == -1:
         return None
-    extract_out = response[block_start + 3 :].strip()
+    extract_out = response[block_start + 3 :]
+    newline_pos = extract_out.find("\n")
+    if newline_pos != -1:
+        extract_out = extract_out[newline_pos + 1 :]
+    extract_out = extract_out.strip()
     if not extract_out:
         return None
     return extract_out
