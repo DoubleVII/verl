@@ -2037,12 +2037,8 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
             loop.run_until_complete(self.rollout_mode())
             log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
-        with simple_timer("generate_rewards", timing_generate), self.rollout.update_sampling_params(detokenize=True):
-            generate_fn = functools.partial(
-                self.rollout.inference_engine.generate,
-                sampling_params=self.rollout.sampling_params,
-                use_tqdm=False,
-            )
+        with simple_timer("generate_rewards", timing_generate):
+            generate_fn = self.rollout.generate_for_rm
             reward_scores = self.custom_processor.compute_scores(
                 data,
                 generate_fn,
@@ -2502,12 +2498,8 @@ class SelfRewardActorRolloutRefWorker(ActorRolloutRefWorker):
         # from generate_sequences
 
         # TODO: update sampling params
-        with simple_timer("generate_rewards", timing_generate), self.rollout.update_sampling_params(detokenize=True):
-            generate_fn = functools.partial(
-                self.rollout.inference_engine.generate,
-                sampling_params=self.rollout.sampling_params,
-                use_tqdm=False,
-            )
+        with simple_timer("generate_rewards", timing_generate):
+            generate_fn = self.rollout.generate_for_rm
             reward_scores = self.custom_processor.compute_scores(
                 data,
                 generate_fn,

@@ -275,6 +275,23 @@ class vLLMRollout(BaseRollout):
         for key, value in old_sampling_params_args.items():
             setattr(self.sampling_params, key, value)
 
+    def generate_for_rm(self, prompt_list: list[dict[str, list[int]]]):
+        """Generate text for reward model scoring.
+
+        Accepts prompt_list in the standard format: List[Dict[str, List[int]]]
+        where each dict has a "prompt_token_ids" key.
+        Returns vLLM RequestOutput objects directly.
+        """
+        if not prompt_list:
+            return []
+
+        with self.update_sampling_params(detokenize=True):
+            return self.inference_engine.generate(
+                prompts=prompt_list,
+                sampling_params=self.sampling_params,
+                use_tqdm=False,
+            )
+
     @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:

@@ -254,6 +254,20 @@ def get_tool_call_parser_type(
         raise ValueError(f"No tool call parser found for processing_class {processing_class}")
 
 
+class _SGLangCompletionOutput:
+    __slots__ = ("text",)
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _SGLangRequestOutput:
+    __slots__ = ("outputs",)
+
+    def __init__(self, text: str):
+        self.outputs = [_SGLangCompletionOutput(text)]
+
+
 class SGLangRollout(BaseRollout):
     def __init__(
         self,
@@ -501,6 +515,46 @@ class SGLangRollout(BaseRollout):
                 kwargs[k] = self.config.get(k)
         kwargs["n"] = 1  # already repeat in ray_trainer
         self.sampling_params = kwargs
+
+    def generate_for_rm(self, prompt_list: list[dict[str, list[int]]]):
+        """Generate text for reward model scoring.
+
+        Accepts prompt_list in the standard format: List[Dict[str, List[int]]]
+        where each dict has a "prompt_token_ids" key.
+        Returns outputs in vLLM-compatible format where each output has
+        .outputs[0].text attribute.
+        """
+        if not prompt_list:
+            return []
+
+        input_ids_list = [item["prompt_token_ids"] for item in prompt_list]
+        sampling_params = self.sampling_params.copy()
+
+        if self._tp_rank == 0:
+            loop = asyncio.get_event_loop()
+            raw_output = loop.run_until_complete(
+                self._engine.async_generate(
+                    prompt=None,
+                    sampling_params=sampling_params,
+                    input_ids=input_ids_list,
+                )
+            )
+        else:
+            raw_output = None
+
+        dist.barrier()
+        [raw_output] = broadcast_pyobj(
+            data=[raw_output],
+            rank=self._rank,
+            dist_group=self._device_mesh_cpu["tp"].get_group(),
+            src=self._device_mesh_cpu["tp"].mesh[0].item(),
+            force_cpu_device=False,
+        )
+
+        if isinstance(raw_output, dict):
+            raw_output = [raw_output]
+
+        return [_SGLangRequestOutput(item.get("text", "")) for item in raw_output]
 
     def _initialize_tools(self, config, processing_class):
         """Initialize tools from configuration.
