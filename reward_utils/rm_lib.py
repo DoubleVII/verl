@@ -30,6 +30,7 @@ try:
     from .prompts import (
         single_get_prompt,
         group_get_prompt,
+        get_GQM_with_notes_prompt,
         _seedx_build_prompt,
         _vanilla_rm_build_prompt,
     )
@@ -37,6 +38,7 @@ except ImportError:
     from reward_utils.prompts import (
         single_get_prompt,
         group_get_prompt,
+        get_GQM_with_notes_prompt,
         _seedx_build_prompt,
         _vanilla_rm_build_prompt,
     )
@@ -45,11 +47,6 @@ try:
     from .language_detector import is_language_match
 except ImportError:
     from reward_utils.language_detector import is_language_match
-
-try:
-    from .post_edit_reward_remote import get_GQM_with_notes_prompt
-except ImportError:
-    from reward_utils.post_edit_reward_remote import get_GQM_with_notes_prompt
 
 
 def single_extract_score(output_text: str) -> Optional[float]:
@@ -85,15 +82,17 @@ class RewardModelProcessor:
 
     def process_input(self, data):
         response_list = _decode_response(data, self.input_tokenizer, self.extractor_type)
-        src_text_list = [item["src_text"] for item in data.non_tensor_batch["extra_info"]]
-        lang_pair_list = [_get_lang_pair(item) for item in data.non_tensor_batch["extra_info"]]
+        extra_info_list = data.non_tensor_batch["extra_info"]
+        src_text_list = [item["src_text"] for item in extra_info_list]
+        notes_list = [item.get("notes", None) for item in extra_info_list]
+        lang_pair_list = [_get_lang_pair(item) for item in extra_info_list]
         src_langs, tgt_langs = zip(*lang_pair_list)
 
         assert len(src_text_list) == len(response_list) == len(src_langs) == len(tgt_langs)
         prompt_list = []
         kept_indices = []
         filtered_indices = []
-        for idx, (src_text, mt_text, src_lang, tgt_lang) in enumerate(zip(src_text_list, response_list, src_langs, tgt_langs)):
+        for idx, (src_text, mt_text, src_lang, tgt_lang, notes) in enumerate(zip(src_text_list, response_list, src_langs, tgt_langs, notes_list)):
             if mt_text is None:
                 filtered_indices.append(idx)
                 continue
@@ -101,7 +100,7 @@ class RewardModelProcessor:
                 if not is_language_match(mt_text, tgt_lang):
                     filtered_indices.append(idx)
                     continue
-            prompt = single_get_prompt(src_text, mt_text, src_lang, tgt_lang)
+            prompt = single_get_prompt(src_text, mt_text, src_lang, tgt_lang, notes=notes)
             messages = [
                 {"role": "user", "content": prompt},
             ]
@@ -193,6 +192,7 @@ class GroupRewardModelProcessor:
         zero_groups: List[List[int]] = []
         for uid_key, indices in groups:
             src_text = extra[indices[0]]["src_text"]
+            notes = extra[indices[0]].get("notes", None)
             src_lang, tgt_lang = _get_lang_pair(extra[indices[0]])
             if len(src_lang) == 2:
                 src_lang = LANG_MAP[src_lang]
@@ -224,7 +224,12 @@ class GroupRewardModelProcessor:
                 for inv in invalid_indices:
                     zero_groups.append([inv])
                 continue
-            prompt = group_get_prompt(src_lang, tgt_lang, src_text, unique_texts, self.prompt_type, add_example=self.add_example)
+            prompt = get_GQM_with_notes_prompt(
+                source_lang=src_lang, target_lang=tgt_lang,
+                source_text=src_text, mt_texts=unique_texts,
+                prompt_format=self.prompt_type, add_example=self.add_example,
+                notes=notes,
+            )
             messages = [{"role": "user", "content": prompt}]
             input_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             raw_ids = self.tokenizer.encode(input_text, add_special_tokens=False)
@@ -478,7 +483,7 @@ class GroupPostEditRewardProcessor:
                 if not is_language_match(pe_mt_text, tgt_lang):
                     continue
 
-            src_text = extra.get("src_text", "")
+            src_text = extra.get("src_text")
             mt_texts = extra.get("mt_texts", [])
             notes = extra.get("notes", None)
 

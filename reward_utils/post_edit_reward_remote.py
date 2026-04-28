@@ -2,104 +2,12 @@ import asyncio
 
 import openai
 
-from reward_utils.config import LANG_MAP, candidate_identifiers
+try:
+    from .prompts import get_GQM_with_notes_prompt
+except ImportError:
+    from reward_utils.prompts import get_GQM_with_notes_prompt
+
 from reward_utils.helpers import _line_extractor, _block_extractor, _one_line_extractor, group_extract_scores
-
-Output_example = {
-    "score": "Output the scores on the last line, for example: `A: 4, B: 9, C: 7, D: 9`.",
-    "ranking": "Output the rankings in descending order on the last line, for example: `B > A = D > C`.",
-    "ranking_score": "At the end section, first output the rankings in descending order, for example: `B > A = D > C`. Then, on the last line, output the scores, for example: `B: 9, A: 7, D: 7, C: 2`.",
-}
-
-
-Task_format = {
-    "score": "Finally, score the candidates with integer scores on a scale from 0 to 10.",
-    "ranking": "Finally, rank the candidates in order of quality from best to worst.",
-    "ranking_score": "Finally, rank and score the candidates with integer scores on a scale from 0 to 10.",
-}
-
-
-GQM_prompt_template = """Given a source text in {source_lang} and multiple translation candidates in {target_lang}. Perform a step by step analysis and comparison of the translation quality for the candidates. {task_prompt}
-
-Source text:
-```
-{source_text}
-```
-
-{candidate_prompts}{notes_prompt}"""
-
-
-notes_prompt_template = """
-
-You may refer to the following notes, if helpful, when evaluating the translations.
-
-Notes:
-```
-{notes}
-```
-"""
-
-
-candidate_prompt = """Translation {}:
-```
-{}
-```
-"""
-
-
-def get_task_prompt(prompt_format: str, add_example: bool = False):
-    if prompt_format not in Task_format:
-        raise ValueError(f"prompt_format must be one of {Task_format.keys()}")
-    task_prompt = Task_format[prompt_format]
-    if add_example:
-        task_prompt += f" {Output_example[prompt_format]}"
-    return task_prompt
-
-
-def build_notes_prompt(notes: str = None) -> str:
-    if notes is None:
-        return ""
-    notes = notes.strip()
-    if not notes:
-        return ""
-    return notes_prompt_template.format(notes=notes)
-
-
-def get_GQM_with_notes_prompt(
-    source_lang,
-    target_lang,
-    source_text,
-    mt_texts,
-    prompt_format: str,
-    add_example: bool = False,
-    notes: str = None,
-):
-    if len(source_lang) == 2:
-        source_lang = LANG_MAP[source_lang]
-    if len(target_lang) == 2:
-        target_lang = LANG_MAP[target_lang]
-    if len(mt_texts) == 1:
-        raise ValueError("Only support multiple candidates.")
-    if len(mt_texts) > len(candidate_identifiers):
-        raise ValueError(f"Only support {len(candidate_identifiers)} candidates.")
-
-    task_prompt = get_task_prompt(prompt_format, add_example)
-
-    candidate_prompts = "".join(
-        candidate_prompt.format(candidate_identifiers[i], mt_texts[i])
-        for i in range(len(mt_texts))
-    )
-
-    notes_prompt = build_notes_prompt(notes)
-
-    return GQM_prompt_template.format(
-        source_lang=source_lang,
-        target_lang=target_lang,
-        task_prompt=task_prompt,
-        source_text=source_text,
-        candidate_prompts=candidate_prompts,
-        notes_prompt=notes_prompt,
-    )
 
 
 
