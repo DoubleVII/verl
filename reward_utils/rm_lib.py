@@ -869,8 +869,8 @@ class MultiTaskSelfRewardProcessor:
         for idx, score in ranking_scores.items():
             final_scores[idx] = score
 
-        avg_translation_score = sum(translation_scores.values())/len(translation_scores)
-        avg_ranking_score = sum(ranking_scores.values())/len(ranking_scores)
+        avg_translation_score = sum(translation_scores.values()) / len(translation_scores) if translation_scores else 0.0
+        avg_ranking_score = sum(ranking_scores.values()) / len(ranking_scores) if ranking_scores else 0.0
         print(f"MultiTaskSelfRewardProcessor: {total_size} total, {len(translation_indices)} translation samples, avg score ({avg_translation_score}); "
               f"{len(ranking_indices)} ranking samples, avg score ({avg_ranking_score}).")
 
