@@ -60,6 +60,163 @@ def single_extract_score(output_text: str) -> Optional[float]:
         return None
 
 
+def compute_group_translation_scores(
+    data,
+    generate_fn,
+    tokenizer,
+    input_tokenizer,
+    *,
+    extractor_type: str,
+    max_prompt_length: int,
+    prompt_type: str,
+    add_example: bool,
+    score_scale_factor: float,
+    default_reward: float,
+    overlong_buffer_cfg,
+    enable_language_detection: bool,
+    indices: Optional[List[int]] = None,
+) -> Dict[int, float]:
+    """Shared group-based translation scoring pipeline.
+
+    Decodes responses, groups by uid, deduplicates translations, builds prompts,
+    calls generate_fn, extracts scores, and applies penalties.
+
+    Args:
+        indices: If None, process all items in the batch. Otherwise, process only
+                 the specified indices (used by MultiTaskSelfRewardProcessor for
+                 translation-only subset).
+
+    Returns:
+        Dict mapping original batch index to score.
+    """
+    responses = _decode_response(data, input_tokenizer, extractor_type)
+    extra = data.non_tensor_batch["extra_info"]
+    uids = data.non_tensor_batch.get("uid", None)
+    if uids is None:
+        raise ValueError("uid not found in batch")
+    uids = list(uids)
+
+    if indices is None:
+        indices = list(range(len(responses)))
+
+    # Group indices by uid
+    groups: Dict[str, List[int]] = {}
+    for idx in indices:
+        key = str(uids[idx])
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(idx)
+    groups = list(groups.items())
+
+    prompt_list: List[Dict[str, List[int]]] = []
+    kept_groups: List[Dict] = []
+    zero_groups: List[List[int]] = []
+
+    for uid_key, group_indices in groups:
+        src_text = extra[group_indices[0]]["src_text"]
+        notes = extra[group_indices[0]].get("notes", None)
+        src_lang, tgt_lang = _get_lang_pair(extra[group_indices[0]])
+        if len(src_lang) == 2:
+            src_lang = LANG_MAP[src_lang]
+        if len(tgt_lang) == 2:
+            tgt_lang = LANG_MAP[tgt_lang]
+
+        seen: Dict[str, int] = {}
+        unique_texts: List[str] = []
+        dup_map: List[List[int]] = []
+        invalid_indices: List[int] = []
+
+        for idx in group_indices:
+            t = responses[idx]
+            if t is None:
+                invalid_indices.append(idx)
+                continue
+            if enable_language_detection:
+                tgt_lang_code = (
+                    extra[group_indices[0]]["trg_lang"]
+                    if "trg_lang" in extra[group_indices[0]]
+                    else extra[group_indices[0]]["lang_pair"].split("-")[1]
+                )
+                if not is_language_match(t, tgt_lang_code):
+                    invalid_indices.append(idx)
+                    continue
+            if t in seen:
+                dup_map[seen[t]].append(idx)
+            else:
+                seen[t] = len(unique_texts)
+                unique_texts.append(t)
+                dup_map.append([idx])
+
+        valid_indices = [i for i in group_indices if i not in invalid_indices]
+
+        if len(unique_texts) <= 1:
+            if valid_indices:
+                zero_groups.append(valid_indices)
+            for inv in invalid_indices:
+                zero_groups.append([inv])
+            continue
+
+        prompt = group_get_prompt(
+            src_lang, tgt_lang, src_text, unique_texts,
+            prompt_type, add_example=add_example, notes=notes,
+        )
+        messages = [{"role": "user", "content": prompt}]
+        input_text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        raw_ids = tokenizer.encode(input_text, add_special_tokens=False)
+
+        if len(raw_ids) > max_prompt_length:
+            if valid_indices:
+                zero_groups.append(valid_indices)
+            for inv in invalid_indices:
+                zero_groups.append([inv])
+            continue
+
+        candidate_lens: List[int] = []
+        for targets in dup_map:
+            first_idx = targets[0]
+            response_ids = data.batch["responses"][first_idx]
+            resp_len = response_ids.shape[-1]
+            valid_len = data.batch["attention_mask"][first_idx][-resp_len:].sum()
+            try:
+                candidate_lens.append(int(valid_len))
+            except Exception:
+                candidate_lens.append(resp_len)
+
+        kept_groups.append({
+            "uid": [uid_key],
+            "dup_map": dup_map,
+            "candidate_lens": candidate_lens,
+        })
+        prompt_list.append({"prompt_token_ids": raw_ids})
+
+    scores_dict: Dict[int, float] = {}
+
+    if prompt_list:
+        outputs = generate_fn(prompt_list)
+        for j, output in enumerate(outputs):
+            text = output.outputs[0].text
+            group_info = kept_groups[j]
+            dup_map = group_info["dup_map"]
+            candidate_lens = group_info.get("candidate_lens", [0] * len(dup_map))
+            scores = group_extract_scores(text, prompt_type, len(dup_map))
+            if scores is None:
+                scores = [default_reward] * len(dup_map)
+            normalized = [s * score_scale_factor for s in scores]
+            for k, targets in enumerate(dup_map):
+                penalty = _compute_overlong_penalty(candidate_lens[k], overlong_buffer_cfg)
+                sc = normalized[k] - penalty
+                for idx in targets:
+                    scores_dict[idx] = sc
+
+    for zero_indices in zero_groups:
+        for idx in zero_indices:
+            scores_dict[idx] = default_reward
+
+    return scores_dict
+
+
 class RewardModelProcessor:
     """Single-translation generative RM: prompts the RM to score each translation individually."""
     def __init__(self, *args, **kwargs):
@@ -170,115 +327,20 @@ class GroupRewardModelProcessor:
         if self.input_tokenizer is None:
             raise ValueError("input_tokenizer must be provided")
 
-    def _group_indices(self, uids: List):
-        groups: Dict[str, List[int]] = {}
-        for idx, uid in enumerate(uids):
-            key = str(uid)
-            if key not in groups:
-                groups[key] = []
-            groups[key].append(idx)
-        return list(groups.items())
-
-    def process_input(self, data) -> Tuple[List[Dict[str, List[int]]], List[Dict[str, List[List[int]]]], List[List[int]], int]:
-        responses = _decode_response(data, self.input_tokenizer, self.extractor_type)
-        extra = data.non_tensor_batch["extra_info"]
-        uids = data.non_tensor_batch.get("uid", None)
-        if uids is None:
-            raise ValueError("uid not found in batch")
-        groups = self._group_indices(list(uids))
-
-        prompt_list: List[Dict[str, List[int]]] = []
-        kept_groups: List[Dict[str, List[List[int]]]] = []
-        zero_groups: List[List[int]] = []
-        for uid_key, indices in groups:
-            src_text = extra[indices[0]]["src_text"]
-            notes = extra[indices[0]].get("notes", None)
-            src_lang, tgt_lang = _get_lang_pair(extra[indices[0]])
-            if len(src_lang) == 2:
-                src_lang = LANG_MAP[src_lang]
-            if len(tgt_lang) == 2:
-                tgt_lang = LANG_MAP[tgt_lang]
-            seen: Dict[str, int] = {}
-            unique_texts: List[str] = []
-            dup_map: List[List[int]] = []
-            invalid_indices: List[int] = []
-            for idx in indices:
-                t = responses[idx]
-                if t is None:
-                    invalid_indices.append(idx)
-                    continue
-                if self.enable_language_detection:
-                    if not is_language_match(t, extra[indices[0]]["trg_lang"] if "trg_lang" in extra[indices[0]] else extra[indices[0]]["lang_pair"].split("-")[1]):
-                        invalid_indices.append(idx)
-                        continue
-                if t in seen:
-                    dup_map[seen[t]].append(idx)
-                else:
-                    seen[t] = len(unique_texts)
-                    unique_texts.append(t)
-                    dup_map.append([idx])
-            valid_indices = [i for i in indices if i not in invalid_indices]
-            if len(unique_texts) <= 1:
-                if valid_indices:
-                    zero_groups.append(valid_indices)
-                for inv in invalid_indices:
-                    zero_groups.append([inv])
-                continue
-            prompt = get_GQM_with_notes_prompt(
-                source_lang=src_lang, target_lang=tgt_lang,
-                source_text=src_text, mt_texts=unique_texts,
-                prompt_format=self.prompt_type, add_example=self.add_example,
-                notes=notes,
-            )
-            messages = [{"role": "user", "content": prompt}]
-            input_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            raw_ids = self.tokenizer.encode(input_text, add_special_tokens=False)
-            if len(raw_ids) > self.max_prompt_length:
-                if valid_indices:
-                    zero_groups.append(valid_indices)
-                for inv in invalid_indices:
-                    zero_groups.append([inv])
-                continue
-            candidate_lens: List[int] = []
-            for targets in dup_map:
-                first_idx = targets[0]
-                response_ids = data.batch["responses"][first_idx]
-                resp_len = response_ids.shape[-1]
-                valid_len = data.batch["attention_mask"][first_idx][-resp_len:].sum()
-                try:
-                    candidate_lens.append(int(valid_len))
-                except Exception:
-                    candidate_lens.append(resp_len)
-            kept_groups.append({"uid": [uid_key], "dup_map": dup_map, "candidate_lens": candidate_lens})
-            prompt_list.append({"prompt_token_ids": raw_ids})
-        total_size = len(responses)
-        return prompt_list, kept_groups, zero_groups, total_size
-
-    def process_output(self, outputs, kept_groups, zero_groups, total_size) -> List[float]:
-        final_scores: List[float] = [self.default_reward] * total_size
-        for j, output in enumerate(outputs):
-            text = output.outputs[0].text
-            group_info = kept_groups[j]
-            dup_map = group_info["dup_map"]
-            candidate_lens = group_info.get("candidate_lens", [0] * len(dup_map))
-            scores = group_extract_scores(text, self.prompt_type, len(dup_map))
-            if scores is None:
-                scores = [self.default_reward] * len(dup_map)
-            normalized = [s * self.score_scale_factor for s in scores]
-            for k, targets in enumerate(dup_map):
-                penalty = _compute_overlong_penalty(candidate_lens[k], self.overlong_buffer_cfg)
-                sc = normalized[k] - penalty
-                for idx in targets:
-                    final_scores[idx] = sc
-        for indices in zero_groups:
-            for idx in indices:
-                final_scores[idx] = self.default_reward
-        return final_scores
-
     def compute_scores(self, data, generate_fn):
-        prompts, kept_groups, zero_groups, total_size = self.process_input(data)
-        outputs = generate_fn(prompts)
-        return self.process_output(outputs, kept_groups, zero_groups, total_size)
+        scores_dict = compute_group_translation_scores(
+            data, generate_fn, self.tokenizer, self.input_tokenizer,
+            extractor_type=self.extractor_type,
+            max_prompt_length=self.max_prompt_length,
+            prompt_type=self.prompt_type,
+            add_example=self.add_example,
+            score_scale_factor=self.score_scale_factor,
+            default_reward=self.default_reward,
+            overlong_buffer_cfg=self.overlong_buffer_cfg,
+            enable_language_detection=self.enable_language_detection,
+        )
+        total_size = data.batch.batch_size[0]
+        return [scores_dict.get(i, self.default_reward) for i in range(total_size)]
 
 
 class SeedXRewardModelProcessor:
@@ -675,126 +737,21 @@ class MultiTaskSelfRewardProcessor:
 
         return translation_indices, ranking_indices
 
-    def _group_indices(self, uids: List, indices: List[int]) -> List[Tuple[str, List[int]]]:
-        groups: Dict[str, List[int]] = {}
-        for idx in indices:
-            key = str(uids[idx])
-            if key not in groups:
-                groups[key] = []
-            groups[key].append(idx)
-        return list(groups.items())
-
     def _process_translation_task(self, data, translation_indices: List[int], generate_fn) -> Dict[int, float]:
         if not translation_indices:
             return {}
-
-        responses = _decode_response(data, self.input_tokenizer, self.extractor_type)
-        extra = data.non_tensor_batch["extra_info"]
-        uids = data.non_tensor_batch.get("uid", None)
-        if uids is None:
-            raise ValueError("uid not found in batch for translation task")
-
-        groups = self._group_indices(list(uids), translation_indices)
-
-        prompt_list: List[Dict[str, List[int]]] = []
-        kept_groups: List[Dict] = []
-        zero_groups: List[List[int]] = []
-
-        bad_lang_count = 0
-
-        for uid_key, indices in groups:
-            src_text = extra[indices[0]]["src_text"]
-            src_lang, tgt_lang = _get_lang_pair(extra[indices[0]])
-            if len(src_lang) == 2:
-                src_lang = LANG_MAP[src_lang]
-            if len(tgt_lang) == 2:
-                tgt_lang = LANG_MAP[tgt_lang]
-
-            seen: Dict[str, int] = {}
-            unique_texts: List[str] = []
-            dup_map: List[List[int]] = []
-            invalid_indices: List[int] = []
-
-            for idx in indices:
-                t = responses[idx]
-                if t is None:
-                    invalid_indices.append(idx)
-                    continue
-                if self.enable_language_detection:
-                    if not is_language_match(t, extra[indices[0]]["trg_lang"] if "trg_lang" in extra[indices[0]] else extra[indices[0]]["lang_pair"].split("-")[1]):
-                        invalid_indices.append(idx)
-                        bad_lang_count += 1
-                        continue
-                if t in seen:
-                    dup_map[seen[t]].append(idx)
-                else:
-                    seen[t] = len(unique_texts)
-                    unique_texts.append(t)
-                    dup_map.append([idx])
-
-            valid_indices = [i for i in indices if i not in invalid_indices]
-
-            if len(unique_texts) <= 1:
-                if valid_indices:
-                    zero_groups.append(valid_indices)
-                for inv in invalid_indices:
-                    zero_groups.append([inv])
-                continue
-
-            prompt = group_get_prompt(src_lang, tgt_lang, src_text, unique_texts, self.prompt_type, add_example=self.add_example)
-            messages = [{"role": "user", "content": prompt}]
-            input_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            raw_ids = self.tokenizer.encode(input_text, add_special_tokens=False)
-
-            if len(raw_ids) > self.max_prompt_length:
-                if valid_indices:
-                    zero_groups.append(valid_indices)
-                for inv in invalid_indices:
-                    zero_groups.append([inv])
-                continue
-
-            candidate_lens: List[int] = []
-            for targets in dup_map:
-                first_idx = targets[0]
-                response_ids = data.batch["responses"][first_idx]
-                resp_len = response_ids.shape[-1]
-                valid_len = data.batch["attention_mask"][first_idx][-resp_len:].sum()
-                try:
-                    candidate_lens.append(int(valid_len))
-                except Exception:
-                    candidate_lens.append(resp_len)
-
-            kept_groups.append({"uid": [uid_key], "dup_map": dup_map, "candidate_lens": candidate_lens})
-            prompt_list.append({"prompt_token_ids": raw_ids})
-
-        scores_dict: Dict[int, float] = {}
-
-        if self.enable_language_detection:
-            print(f"[DEBUG] Bad lang count: {bad_lang_count}/{len(translation_indices)}")
-
-        if prompt_list:
-            outputs = generate_fn(prompt_list)
-
-            for j, output in enumerate(outputs):
-                text = output.outputs[0].text
-                group_info = kept_groups[j]
-                dup_map = group_info["dup_map"]
-                candidate_lens = group_info.get("candidate_lens", [0] * len(dup_map))
-                scores = group_extract_scores(text, self.prompt_type, len(dup_map))
-                if scores is None:
-                    scores = [self.default_reward] * len(dup_map)
-                normalized = [s * self.mt_score_scale_factor for s in scores]
-                for k, targets in enumerate(dup_map):
-                    penalty = _compute_overlong_penalty(candidate_lens[k], self.overlong_buffer_cfg)
-                    sc = normalized[k] - penalty
-                    for idx in targets:
-                        scores_dict[idx] = sc
-
-        for indices in zero_groups:
-            for idx in indices:
-                scores_dict[idx] = self.default_reward
-
-        return scores_dict
+        return compute_group_translation_scores(
+            data, generate_fn, self.tokenizer, self.input_tokenizer,
+            extractor_type=self.extractor_type,
+            max_prompt_length=self.max_prompt_length,
+            prompt_type=self.prompt_type,
+            add_example=self.add_example,
+            score_scale_factor=self.mt_score_scale_factor,
+            default_reward=self.default_reward,
+            overlong_buffer_cfg=self.overlong_buffer_cfg,
+            enable_language_detection=self.enable_language_detection,
+            indices=translation_indices,
+        )
 
     def _process_ranking_task(self, data, ranking_indices: List[int]) -> Dict[int, float]:
         if not ranking_indices:
