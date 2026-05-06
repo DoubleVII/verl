@@ -192,6 +192,7 @@ def compute_group_translation_scores(
         prompt_list.append({"prompt_token_ids": raw_ids})
 
     scores_dict: Dict[int, float] = {}
+    reward_failed_count = 0
 
     if prompt_list:
         outputs = generate_fn(prompt_list)
@@ -203,6 +204,7 @@ def compute_group_translation_scores(
             scores = group_extract_scores(text, prompt_type, len(dup_map))
             if scores is None:
                 scores = [default_reward] * len(dup_map)
+                reward_failed_count += len(dup_map)
             normalized = [s * score_scale_factor for s in scores]
             for k, targets in enumerate(dup_map):
                 penalty = _compute_overlong_penalty(candidate_lens[k], overlong_buffer_cfg)
@@ -214,6 +216,7 @@ def compute_group_translation_scores(
         for idx in zero_indices:
             scores_dict[idx] = default_reward
 
+    print(f"[DEBUG] Reward failed count: {reward_failed_count} / {len(scores_dict)}")
     return scores_dict
 
 
