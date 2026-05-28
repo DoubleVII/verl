@@ -223,6 +223,17 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    if "ability" in batch.non_tensor_batch:
+        abilities = batch.non_tensor_batch["ability"]
+        total_count = len(abilities)
+        unique_abilities = set(str(a).strip().lower() for a in abilities)
+        for task_type in sorted(unique_abilities):
+            task_mask = np.array([str(a).strip().lower() == task_type for a in abilities])
+            metrics[f"task/{task_type}/ratio"] = task_mask.sum() / total_count
+            task_non_aborted = task_mask & non_aborted_mask.cpu().numpy()
+            if task_non_aborted.sum() > 0:
+                metrics[f"task/{task_type}/score/mean"] = sequence_score[task_non_aborted].mean().detach().item()
+
     return metrics
 
 
