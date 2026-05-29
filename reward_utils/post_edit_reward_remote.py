@@ -3,9 +3,9 @@ import asyncio
 import openai
 
 try:
-    from .prompts import get_GQM_with_notes_prompt
+    from .prompts import get_GQM_prompt
 except ImportError:
-    from reward_utils.prompts import get_GQM_with_notes_prompt
+    from reward_utils.prompts import get_GQM_prompt
 
 from reward_utils.helpers import _line_extractor, _block_extractor, _one_line_extractor, group_extract_scores
 
@@ -80,7 +80,7 @@ async def group_post_edit_score_reward_fn(
         return reward_out
 
     # build GQM prompt (notes included unless empty/None)
-    prompt = get_GQM_with_notes_prompt(
+    prompt = get_GQM_prompt(
         source_lang=src_lang,
         target_lang=trg_lang,
         source_text=src_text,

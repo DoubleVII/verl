@@ -90,6 +90,17 @@ Notes:
 """
 
 
+REFERENCE_PROMPT_TEMPLATE = """
+
+You may refer to the following reference, if helpful, when evaluating the translations.
+
+{} reference:
+```
+{}
+```
+"""
+
+
 def _build_notes_prompt(notes=None):
     if notes is None:
         return ""
@@ -99,15 +110,42 @@ def _build_notes_prompt(notes=None):
     return NOTES_PROMPT_TEMPLATE.format(notes)
 
 
-def group_get_prompt(source_lang: str, target_lang: str, source_text: str, mt_texts: List[str], prompt_format: str, add_example: bool = False, notes: str = None) -> str:
+def _build_reference_prompt(ref_text=None, ref_lang=None):
+    if ref_text is None or ref_lang is None:
+        return ""
+    ref_text = ref_text.strip()
+    ref_lang = ref_lang.strip()
+    if not ref_text or not ref_lang:
+        return ""
+    if len(ref_lang) == 2 and ref_lang in LANG_MAP:
+        ref_lang = LANG_MAP[ref_lang]
+    return REFERENCE_PROMPT_TEMPLATE.format(ref_lang, ref_text)
+
+
+def get_GQM_prompt(
+    source_lang: str,
+    target_lang: str,
+    source_text: str,
+    mt_texts: List[str],
+    prompt_format: str,
+    add_example: bool = False,
+    notes: str = None,
+    ref_text: str = None,
+    ref_lang: str = None,
+) -> str:
     if len(mt_texts) == 1:
         raise ValueError("Only support multiple candidates.")
     if len(mt_texts) > len(candidate_identifiers):
         raise ValueError(f"Only support {len(candidate_identifiers)} candidates.")
+    if len(source_lang) == 2 and source_lang in LANG_MAP:
+        source_lang = LANG_MAP[source_lang]
+    if len(target_lang) == 2 and target_lang in LANG_MAP:
+        target_lang = LANG_MAP[target_lang]
     task_prompt = _group_get_task_prompt(prompt_format, add_example)
     candidate_prompts = "".join([CANDIDATE_PROMPT.format(candidate_identifiers[i], mt_texts[i]) for i in range(len(mt_texts))])
+    reference_prompt = _build_reference_prompt(ref_text, ref_lang)
     notes_prompt = _build_notes_prompt(notes)
-    return GROUP_PROMPT_TEMPLATE.format(source_lang, target_lang, task_prompt, source_text, candidate_prompts, notes_prompt)
+    return GROUP_PROMPT_TEMPLATE.format(source_lang, target_lang, task_prompt, source_text, candidate_prompts, reference_prompt + notes_prompt)
 
 
 def _seedx_build_prompt(src_text: str, mt_text: str, src_lang: str, trg_lang: str) -> str:
@@ -134,30 +172,3 @@ def _vanilla_rm_build_prompt(tokenizer, src_lang: str, trg_lang: str, src_text: 
     full_prompt = f"{prompt}{mt_text}{tokenizer.eos_token}"
     return full_prompt
 
-
-def get_GQM_with_notes_prompt(
-    source_lang,
-    target_lang,
-    source_text,
-    mt_texts,
-    prompt_format: str,
-    add_example: bool = False,
-    notes: str = None,
-):
-    if len(source_lang) == 2:
-        source_lang = LANG_MAP[source_lang]
-    if len(target_lang) == 2:
-        target_lang = LANG_MAP[target_lang]
-    if len(mt_texts) == 1:
-        raise ValueError("Only support multiple candidates.")
-    if len(mt_texts) > len(candidate_identifiers):
-        raise ValueError(f"Only support {len(candidate_identifiers)} candidates.")
-    task_prompt = _group_get_task_prompt(prompt_format, add_example)
-    candidate_prompts = "".join(
-        CANDIDATE_PROMPT.format(candidate_identifiers[i], mt_texts[i])
-        for i in range(len(mt_texts))
-    )
-    notes_prompt = _build_notes_prompt(notes)
-    return GROUP_PROMPT_TEMPLATE.format(
-        source_lang, target_lang, task_prompt, source_text, candidate_prompts, notes_prompt,
-    )

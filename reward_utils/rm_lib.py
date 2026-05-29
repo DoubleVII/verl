@@ -29,16 +29,14 @@ except ImportError:
 try:
     from .prompts import (
         single_get_prompt,
-        group_get_prompt,
-        get_GQM_with_notes_prompt,
+        get_GQM_prompt,
         _seedx_build_prompt,
         _vanilla_rm_build_prompt,
     )
 except ImportError:
     from reward_utils.prompts import (
         single_get_prompt,
-        group_get_prompt,
-        get_GQM_with_notes_prompt,
+        get_GQM_prompt,
         _seedx_build_prompt,
         _vanilla_rm_build_prompt,
     )
@@ -112,9 +110,16 @@ def compute_group_translation_scores(
     kept_groups: List[Dict] = []
     zero_groups: List[List[int]] = []
 
+    print_debug = True
+
     for uid_key, group_indices in groups:
         src_text = extra[group_indices[0]]["src_text"]
         notes = extra[group_indices[0]].get("notes", None)
+        ref_text = extra[group_indices[0]].get("ref_text", None)
+        ref_lang = extra[group_indices[0]].get("ref_lang", None)
+        if ref_text and ref_lang and print_debug:
+            print(f"[DEBUG] using reference_prompt in lang: {ref_lang}")
+            print_debug = False
         src_lang, tgt_lang = _get_lang_pair(extra[group_indices[0]])
         if len(src_lang) == 2:
             src_lang = LANG_MAP[src_lang]
@@ -156,9 +161,10 @@ def compute_group_translation_scores(
                 zero_groups.append([inv])
             continue
 
-        prompt = group_get_prompt(
+        prompt = get_GQM_prompt(
             src_lang, tgt_lang, src_text, unique_texts,
             prompt_type, add_example=add_example, notes=notes,
+            ref_text=ref_text, ref_lang=ref_lang,
         )
         messages = [{"role": "user", "content": prompt}]
         input_text = tokenizer.apply_chat_template(
@@ -560,7 +566,7 @@ class GroupPostEditRewardProcessor:
             if num_candidates < 2:
                 continue
 
-            prompt = get_GQM_with_notes_prompt(
+            prompt = get_GQM_prompt(
                 source_lang=src_lang,
                 target_lang=tgt_lang,
                 source_text=src_text,
