@@ -226,6 +226,159 @@ def compute_group_translation_scores(
     return scores_dict
 
 
+def prepare_group_post_edit_inputs(
+    data,
+    tokenizer,
+    input_tokenizer,
+    *,
+    extractor_type: str,
+    max_prompt_length: int,
+    prompt_format: str,
+    add_example: bool,
+    rm_max_candidates: int,
+    enable_language_detection: bool,
+    indices: Optional[List[int]] = None,
+) -> Tuple[List[Dict[str, List[int]]], List[Dict], int]:
+    responses = _decode_response(data, input_tokenizer, extractor_type)
+    extra_info_list = data.non_tensor_batch["extra_info"]
+    total_size = len(responses)
+
+    if indices is None:
+        indices = list(range(total_size))
+
+    prompt_list: List[Dict[str, List[int]]] = []
+    kept_info: List[Dict] = []
+    for idx in indices:
+        pe_mt_text = responses[idx]
+        if pe_mt_text is None:
+            continue
+
+        extra = extra_info_list[idx]
+        src_lang, tgt_lang = _get_lang_pair(extra)
+
+        if enable_language_detection:
+            if not is_language_match(pe_mt_text, tgt_lang):
+                continue
+
+        src_text = extra.get("src_text")
+        raw_mt_texts = extra.get("mt_texts", [])
+        mt_texts = [] if raw_mt_texts is None else list(raw_mt_texts)
+        notes = extra.get("notes", None)
+        ref_text = extra.get("ref_text", None)
+        ref_lang = extra.get("ref_lang", None)
+
+        if 1 + len(mt_texts) > rm_max_candidates:
+            mt_texts = mt_texts[: rm_max_candidates - 1]
+
+        all_mt_texts = mt_texts + [pe_mt_text]
+        num_candidates = len(all_mt_texts)
+        if num_candidates < 2:
+            continue
+
+        prompt = get_GQM_prompt(
+            source_lang=src_lang,
+            target_lang=tgt_lang,
+            source_text=src_text,
+            mt_texts=all_mt_texts,
+            prompt_format=prompt_format,
+            add_example=add_example,
+            notes=notes,
+            ref_text=ref_text,
+            ref_lang=ref_lang,
+        )
+        messages = [{"role": "user", "content": prompt}]
+        input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        raw_ids = tokenizer.encode(input_text, add_special_tokens=False)
+
+        if len(raw_ids) > max_prompt_length:
+            continue
+
+        response_ids = data.batch["responses"][idx]
+        resp_len = response_ids.shape[-1]
+        valid_len = data.batch["attention_mask"][idx][-resp_len:].sum()
+        try:
+            candidate_len = int(valid_len)
+        except Exception:
+            candidate_len = resp_len
+
+        kept_info.append({"orig_idx": idx, "num_candidates": num_candidates, "response_len": candidate_len})
+        prompt_list.append({"prompt_token_ids": raw_ids})
+
+    return prompt_list, kept_info, total_size
+
+
+def process_group_post_edit_outputs(
+    outputs,
+    kept_info,
+    *,
+    prompt_format: str,
+    score_scale_factor: float,
+    reward_scale: float,
+    default_reward: float,
+    overlong_buffer_cfg,
+) -> Dict[int, float]:
+    scores_dict: Dict[int, float] = {}
+    for j, output in enumerate(outputs):
+        text = output.outputs[0].text
+        info = kept_info[j]
+        num_candidates = info["num_candidates"]
+        orig_idx = info["orig_idx"]
+        scores = group_extract_scores(text, prompt_format, num_candidates)
+        if scores is None:
+            scores_dict[orig_idx] = default_reward
+            continue
+        pe_mt_score = scores[-1]
+        mean_all = sum(scores) / len(scores)
+        relative_reward = (pe_mt_score - mean_all) * score_scale_factor
+        penalty = _compute_overlong_penalty(info["response_len"], overlong_buffer_cfg)
+        scores_dict[orig_idx] = relative_reward * reward_scale - penalty
+    return scores_dict
+
+
+def compute_group_post_edit_scores(
+    data,
+    generate_fn,
+    tokenizer,
+    input_tokenizer,
+    *,
+    extractor_type: str,
+    max_prompt_length: int,
+    prompt_format: str,
+    add_example: bool,
+    score_scale_factor: float,
+    reward_scale: float,
+    default_reward: float,
+    rm_max_candidates: int,
+    overlong_buffer_cfg,
+    enable_language_detection: bool,
+    indices: Optional[List[int]] = None,
+) -> Dict[int, float]:
+    prompt_list, kept_info, _ = prepare_group_post_edit_inputs(
+        data,
+        tokenizer,
+        input_tokenizer,
+        extractor_type=extractor_type,
+        max_prompt_length=max_prompt_length,
+        prompt_format=prompt_format,
+        add_example=add_example,
+        rm_max_candidates=rm_max_candidates,
+        enable_language_detection=enable_language_detection,
+        indices=indices,
+    )
+    if not prompt_list:
+        return {}
+    outputs = generate_fn(prompt_list)
+    return process_group_post_edit_outputs(
+        outputs,
+        kept_info,
+        prompt_format=prompt_format,
+        score_scale_factor=score_scale_factor,
+        reward_scale=reward_scale,
+        default_reward=default_reward,
+        overlong_buffer_cfg=overlong_buffer_cfg,
+    )
+
+
 class RewardModelProcessor:
     """Single-translation generative RM: prompts the RM to score each translation individually."""
     def __init__(self, *args, **kwargs):
@@ -536,85 +689,37 @@ class GroupPostEditRewardProcessor:
             raise ValueError("input_tokenizer must be provided")
 
     def process_input(self, data):
-        responses = _decode_response(data, self.input_tokenizer, self.extractor_type)
-        extra_info_list = data.non_tensor_batch["extra_info"]
-        total_size = len(responses)
-
-        prompt_list: List[Dict[str, List[int]]] = []
-        kept_info: List[Dict] = []
-        for idx in range(total_size):
-            pe_mt_text = responses[idx]
-            if pe_mt_text is None:
-                continue
-
-            extra = extra_info_list[idx]
-            src_lang, tgt_lang = _get_lang_pair(extra)
-
-            if self.enable_language_detection:
-                if not is_language_match(pe_mt_text, tgt_lang):
-                    continue
-
-            src_text = extra.get("src_text")
-            mt_texts = extra.get("mt_texts", [])
-            notes = extra.get("notes", None)
-
-            if 1 + len(mt_texts) > self.rm_max_candidates:
-                mt_texts = mt_texts[: self.rm_max_candidates - 1]
-
-            all_mt_texts = mt_texts + [pe_mt_text]
-            num_candidates = len(all_mt_texts)
-            if num_candidates < 2:
-                continue
-
-            prompt = get_GQM_prompt(
-                source_lang=src_lang,
-                target_lang=tgt_lang,
-                source_text=src_text,
-                mt_texts=all_mt_texts,
-                prompt_format=self.prompt_format,
-                add_example=self.add_example,
-                notes=notes,
-            )
-            messages = [{"role": "user", "content": prompt}]
-            input_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            raw_ids = self.tokenizer.encode(input_text, add_special_tokens=False)
-
-            if len(raw_ids) > self.max_prompt_length:
-                continue
-
-            response_ids = data.batch["responses"][idx]
-            resp_len = response_ids.shape[-1]
-            valid_len = data.batch["attention_mask"][idx][-resp_len:].sum()
-            try:
-                candidate_len = int(valid_len)
-            except Exception:
-                candidate_len = resp_len
-
-            kept_info.append({"orig_idx": idx, "num_candidates": num_candidates, "response_len": candidate_len})
-            prompt_list.append({"prompt_token_ids": raw_ids})
-
-        return prompt_list, kept_info, total_size
+        return prepare_group_post_edit_inputs(
+            data,
+            self.tokenizer,
+            self.input_tokenizer,
+            extractor_type=self.extractor_type,
+            max_prompt_length=self.max_prompt_length,
+            prompt_format=self.prompt_format,
+            add_example=self.add_example,
+            rm_max_candidates=self.rm_max_candidates,
+            enable_language_detection=self.enable_language_detection,
+        )
 
     def process_output(self, outputs, kept_info, total_size) -> List[float]:
         final_scores: List[float] = [self.default_reward] * total_size
-        for j, output in enumerate(outputs):
-            text = output.outputs[0].text
-            info = kept_info[j]
-            num_candidates = info["num_candidates"]
-            orig_idx = info["orig_idx"]
-            scores = group_extract_scores(text, self.prompt_format, num_candidates)
-            if scores is None:
-                final_scores[orig_idx] = self.default_reward
-                continue
-            pe_mt_score = scores[-1]
-            mean_all = sum(scores) / len(scores)
-            relative_reward = (pe_mt_score - mean_all) * self.score_scale_factor
-            penalty = _compute_overlong_penalty(info["response_len"], self.overlong_buffer_cfg)
-            final_scores[orig_idx] = relative_reward * self.reward_scale - penalty
+        scores_dict = process_group_post_edit_outputs(
+            outputs,
+            kept_info,
+            prompt_format=self.prompt_format,
+            score_scale_factor=self.score_scale_factor,
+            reward_scale=self.reward_scale,
+            default_reward=self.default_reward,
+            overlong_buffer_cfg=self.overlong_buffer_cfg,
+        )
+        for idx, score in scores_dict.items():
+            final_scores[idx] = score
         return final_scores
 
     def compute_scores(self, data, generate_fn):
         prompt_list, kept_info, total_size = self.process_input(data)
+        if not prompt_list:
+            return [self.default_reward] * total_size
         outputs = generate_fn(prompt_list)
         return self.process_output(outputs, kept_info, total_size)
 
@@ -695,7 +800,7 @@ def batch_bleurt_reward_fn(
 
 
 class MultiTaskSelfRewardProcessor:
-    """Routes samples to translation (generative RM) or ranking (rule-based) scoring based on the 'ability' field."""
+    """Routes samples to translation, ranking, or group post-edit scoring based on the 'ability' field."""
 
     def __init__(self, *args, **kwargs):
         self.config = kwargs.get("config")
@@ -715,7 +820,10 @@ class MultiTaskSelfRewardProcessor:
         self.add_example = getattr(self.config, "group_add_example", False)
         score_scale_factor  = getattr(self.config, "score_scale_factor", 1.0)
         self.mt_score_scale_factor = getattr(self.config, "mt_score_scale_factor", score_scale_factor)
+        self.gpe_score_scale_factor = getattr(self.config, "gpe_score_scale_factor", score_scale_factor)
+        self.gpe_reward_scale = getattr(self.config, "gpe_reward_scale", getattr(self.config, "reward_scale", 1.0))
         self.default_reward = getattr(self.config, "default_reward", 0.0)
+        self.rm_max_candidates = getattr(self.config, "rm_max_candidates", 4)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
         if self.enable_language_detection:
@@ -724,15 +832,19 @@ class MultiTaskSelfRewardProcessor:
         self.ranking_score_scale_factor = getattr(self.config, "ranking_score_scale_factor", score_scale_factor)
 
         print(f"MultiTaskSelfRewardProcessor initialized with prompt_type={self.prompt_type}, "
-              f"mt_score_scale_factor={self.mt_score_scale_factor}, ranking_score_scale_factor={self.ranking_score_scale_factor}")
+              f"mt_score_scale_factor={self.mt_score_scale_factor}, "
+              f"ranking_score_scale_factor={self.ranking_score_scale_factor}, "
+              f"gpe_score_scale_factor={self.gpe_score_scale_factor}, "
+              f"gpe_reward_scale={self.gpe_reward_scale}, rm_max_candidates={self.rm_max_candidates}")
 
-    def _split_by_ability(self, data) -> Tuple[List[int], List[int]]:
+    def _split_by_ability(self, data) -> Tuple[List[int], List[int], List[int]]:
         abilities = data.non_tensor_batch.get("ability", None)
         if abilities is None:
             raise ValueError("ability not found in data.non_tensor_batch")
 
         translation_indices = []
         ranking_indices = []
+        group_post_edit_indices = []
 
         for idx, ability in enumerate(abilities):
             ability_str = str(ability).strip().lower()
@@ -740,11 +852,13 @@ class MultiTaskSelfRewardProcessor:
                 translation_indices.append(idx)
             elif ability_str == "ranking":
                 ranking_indices.append(idx)
+            elif ability_str == "group_post_edit":
+                group_post_edit_indices.append(idx)
             else:
                 print(f"Warning: Unknown ability type '{ability}' at index {idx}, treating as translation")
                 translation_indices.append(idx)
 
-        return translation_indices, ranking_indices
+        return translation_indices, ranking_indices, group_post_edit_indices
 
     def _process_translation_task(self, data, translation_indices: List[int], generate_fn) -> Dict[int, float]:
         if not translation_indices:
@@ -760,6 +874,24 @@ class MultiTaskSelfRewardProcessor:
             overlong_buffer_cfg=self.overlong_buffer_cfg,
             enable_language_detection=self.enable_language_detection,
             indices=translation_indices,
+        )
+
+    def _process_group_post_edit_task(self, data, group_post_edit_indices: List[int], generate_fn) -> Dict[int, float]:
+        if not group_post_edit_indices:
+            return {}
+        return compute_group_post_edit_scores(
+            data, generate_fn, self.tokenizer, self.input_tokenizer,
+            extractor_type=self.extractor_type,
+            max_prompt_length=self.max_prompt_length,
+            prompt_format=self.prompt_type,
+            add_example=self.add_example,
+            score_scale_factor=self.gpe_score_scale_factor,
+            reward_scale=self.gpe_reward_scale,
+            default_reward=self.default_reward,
+            rm_max_candidates=self.rm_max_candidates,
+            overlong_buffer_cfg=self.overlong_buffer_cfg,
+            enable_language_detection=self.enable_language_detection,
+            indices=group_post_edit_indices,
         )
 
     def _process_ranking_task(self, data, ranking_indices: List[int]) -> Dict[int, float]:
@@ -823,12 +955,16 @@ class MultiTaskSelfRewardProcessor:
 
     def compute_scores(self, data, generate_fn):
         total_size = data.batch.batch_size[0]
-        translation_indices, ranking_indices = self._split_by_ability(data)
+        translation_indices, ranking_indices, group_post_edit_indices = self._split_by_ability(data)
 
         final_scores: List[float] = [self.default_reward] * total_size
 
         translation_scores = self._process_translation_task(data, translation_indices, generate_fn)
         for idx, score in translation_scores.items():
+            final_scores[idx] = score
+
+        group_post_edit_scores = self._process_group_post_edit_task(data, group_post_edit_indices, generate_fn)
+        for idx, score in group_post_edit_scores.items():
             final_scores[idx] = score
 
         ranking_scores = self._process_ranking_task(data, ranking_indices)
