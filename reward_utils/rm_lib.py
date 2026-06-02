@@ -110,16 +110,12 @@ def compute_group_translation_scores(
     kept_groups: List[Dict] = []
     zero_groups: List[List[int]] = []
 
-    print_debug = True
 
     for uid_key, group_indices in groups:
         src_text = extra[group_indices[0]]["src_text"]
         notes = extra[group_indices[0]].get("notes", None)
         ref_text = extra[group_indices[0]].get("ref_text", None)
         ref_lang = extra[group_indices[0]].get("ref_lang", None)
-        if ref_text and ref_lang and print_debug:
-            print(f"[DEBUG] using reference_prompt in lang: {ref_lang}")
-            print_debug = False
         src_lang, tgt_lang = _get_lang_pair(extra[group_indices[0]])
         if len(src_lang) == 2:
             src_lang = LANG_MAP[src_lang]
