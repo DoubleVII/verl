@@ -37,7 +37,6 @@ async def group_post_edit_score_reward_fn(
     rm_sampling_top_p: float = 1,
     extractor_type: str = "codeblock",
     default_reward: float = -1.0,
-    reward_scale: float = 1.0,
     prompt_format: str = "ranking_score",
     add_example: bool = False,
     rm_model_name: str = None,
@@ -122,11 +121,10 @@ async def group_post_edit_score_reward_fn(
     baseline_scores = scores[:pe_mt_index]
     mean_all = sum(scores) / len(scores)
     relative_reward = pe_mt_score - mean_all
-    final_reward = reward_scale * relative_reward
 
     baseline_mean = sum(baseline_scores) / len(baseline_scores) if baseline_scores else 0.0
     return {
-        "score": final_reward,
+        "score": relative_reward,
         "valid_answer": 1,
         "pt_mt_score": pe_mt_score,
         "baseline_score": baseline_mean,
@@ -145,7 +143,6 @@ def batch_group_post_edit_score_reward_fn(
     rm_sampling_top_p: float = 1,
     extractor_type: str = "codeblock",
     default_reward: float = -1.0,
-    reward_scale: float = 1.0,
     prompt_format: str = "ranking_score",
     add_example: bool = False,
     rm_model_name: str = None,
@@ -174,7 +171,6 @@ def batch_group_post_edit_score_reward_fn(
                     rm_sampling_top_p=rm_sampling_top_p,
                     extractor_type=extractor_type,
                     default_reward=default_reward,
-                    reward_scale=reward_scale,
                     prompt_format=prompt_format,
                     add_example=add_example,
                     rm_model_name=rm_model_name,

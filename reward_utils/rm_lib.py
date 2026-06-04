@@ -309,7 +309,6 @@ def process_group_post_edit_outputs(
     *,
     prompt_format: str,
     score_scale_factor: float,
-    reward_scale: float,
     default_reward: float,
     overlong_buffer_cfg,
 ) -> Dict[int, float]:
@@ -327,7 +326,7 @@ def process_group_post_edit_outputs(
         mean_all = sum(scores) / len(scores)
         relative_reward = (pe_mt_score - mean_all) * score_scale_factor
         penalty = _compute_overlong_penalty(info["response_len"], overlong_buffer_cfg)
-        scores_dict[orig_idx] = relative_reward * reward_scale - penalty
+        scores_dict[orig_idx] = relative_reward - penalty
     return scores_dict
 
 
@@ -342,7 +341,6 @@ def compute_group_post_edit_scores(
     prompt_format: str,
     add_example: bool,
     score_scale_factor: float,
-    reward_scale: float,
     default_reward: float,
     rm_max_candidates: int,
     overlong_buffer_cfg,
@@ -369,7 +367,6 @@ def compute_group_post_edit_scores(
         kept_info,
         prompt_format=prompt_format,
         score_scale_factor=score_scale_factor,
-        reward_scale=reward_scale,
         default_reward=default_reward,
         overlong_buffer_cfg=overlong_buffer_cfg,
     )
@@ -671,7 +668,6 @@ class GroupPostEditRewardProcessor:
         print(f"Using extractor_type: {self.extractor_type}")
         self.prompt_format = getattr(self.config, "group_prompt_type", "ranking_score")
         self.add_example = getattr(self.config, "group_add_example", False)
-        self.reward_scale = getattr(self.config, "reward_scale", 1.0)
         self.default_reward = getattr(self.config, "default_reward", -1.0)
         self.rm_max_candidates = getattr(self.config, "rm_max_candidates", 4)
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
@@ -704,7 +700,6 @@ class GroupPostEditRewardProcessor:
             kept_info,
             prompt_format=self.prompt_format,
             score_scale_factor=self.score_scale_factor,
-            reward_scale=self.reward_scale,
             default_reward=self.default_reward,
             overlong_buffer_cfg=self.overlong_buffer_cfg,
         )
@@ -817,7 +812,6 @@ class MultiTaskSelfRewardProcessor:
         score_scale_factor  = getattr(self.config, "score_scale_factor", 1.0)
         self.mt_score_scale_factor = getattr(self.config, "mt_score_scale_factor", score_scale_factor)
         self.gpe_score_scale_factor = getattr(self.config, "gpe_score_scale_factor", score_scale_factor)
-        self.gpe_reward_scale = getattr(self.config, "gpe_reward_scale", getattr(self.config, "reward_scale", 1.0))
         self.default_reward = getattr(self.config, "default_reward", 0.0)
         self.rm_max_candidates = getattr(self.config, "rm_max_candidates", 4)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
@@ -831,7 +825,7 @@ class MultiTaskSelfRewardProcessor:
               f"mt_score_scale_factor={self.mt_score_scale_factor}, "
               f"ranking_score_scale_factor={self.ranking_score_scale_factor}, "
               f"gpe_score_scale_factor={self.gpe_score_scale_factor}, "
-              f"gpe_reward_scale={self.gpe_reward_scale}, rm_max_candidates={self.rm_max_candidates}")
+              f"rm_max_candidates={self.rm_max_candidates}")
 
     def _split_by_ability(self, data) -> Tuple[List[int], List[int], List[int]]:
         abilities = data.non_tensor_batch.get("ability", None)
@@ -882,7 +876,6 @@ class MultiTaskSelfRewardProcessor:
             prompt_format=self.prompt_type,
             add_example=self.add_example,
             score_scale_factor=self.gpe_score_scale_factor,
-            reward_scale=self.gpe_reward_scale,
             default_reward=self.default_reward,
             rm_max_candidates=self.rm_max_candidates,
             overlong_buffer_cfg=self.overlong_buffer_cfg,
