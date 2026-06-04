@@ -346,7 +346,31 @@ def compute_group_post_edit_scores(
     overlong_buffer_cfg,
     enable_language_detection: bool,
     indices: Optional[List[int]] = None,
+    score_mode: str = "mt_group_advantage",
 ) -> Dict[int, float]:
+    if score_mode == "grpo_group_score":
+        return compute_group_translation_scores(
+            data,
+            generate_fn,
+            tokenizer,
+            input_tokenizer,
+            extractor_type=extractor_type,
+            max_prompt_length=max_prompt_length,
+            prompt_type=prompt_format,
+            add_example=add_example,
+            score_scale_factor=score_scale_factor,
+            default_reward=default_reward,
+            overlong_buffer_cfg=overlong_buffer_cfg,
+            enable_language_detection=enable_language_detection,
+            indices=indices,
+        )
+    if score_mode != "mt_group_advantage":
+        raise ValueError(
+            "group post-edit score_mode must be one of "
+            "['mt_group_advantage', 'grpo_group_score'], got "
+            f"{score_mode!r}"
+        )
+
     prompt_list, kept_info, _ = prepare_group_post_edit_inputs(
         data,
         tokenizer,
@@ -671,8 +695,10 @@ class GroupPostEditRewardProcessor:
         self.default_reward = getattr(self.config, "default_reward", -1.0)
         self.rm_max_candidates = getattr(self.config, "rm_max_candidates", 4)
         self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
+        self.group_post_edit_score_mode = getattr(self.config, "group_post_edit_score_mode", "mt_group_advantage")
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
+        print(f"Using group_post_edit_score_mode: {self.group_post_edit_score_mode}")
         if self.enable_language_detection:
             print(f"Language detection enabled")
         if self.tokenizer is None:
@@ -708,11 +734,24 @@ class GroupPostEditRewardProcessor:
         return final_scores
 
     def compute_scores(self, data, generate_fn):
-        prompt_list, kept_info, total_size = self.process_input(data)
-        if not prompt_list:
-            return [self.default_reward] * total_size
-        outputs = generate_fn(prompt_list)
-        return self.process_output(outputs, kept_info, total_size)
+        scores_dict = compute_group_post_edit_scores(
+            data,
+            generate_fn,
+            self.tokenizer,
+            self.input_tokenizer,
+            extractor_type=self.extractor_type,
+            max_prompt_length=self.max_prompt_length,
+            prompt_format=self.prompt_format,
+            add_example=self.add_example,
+            score_scale_factor=self.score_scale_factor,
+            default_reward=self.default_reward,
+            rm_max_candidates=self.rm_max_candidates,
+            overlong_buffer_cfg=self.overlong_buffer_cfg,
+            enable_language_detection=self.enable_language_detection,
+            score_mode=self.group_post_edit_score_mode,
+        )
+        total_size = data.batch.batch_size[0]
+        return [scores_dict.get(i, self.default_reward) for i in range(total_size)]
 
 
 def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
@@ -814,6 +853,7 @@ class MultiTaskSelfRewardProcessor:
         self.gpe_score_scale_factor = getattr(self.config, "gpe_score_scale_factor", score_scale_factor)
         self.default_reward = getattr(self.config, "default_reward", 0.0)
         self.rm_max_candidates = getattr(self.config, "rm_max_candidates", 4)
+        self.group_post_edit_score_mode = getattr(self.config, "group_post_edit_score_mode", "mt_group_advantage")
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
         if self.enable_language_detection:
@@ -825,6 +865,7 @@ class MultiTaskSelfRewardProcessor:
               f"mt_score_scale_factor={self.mt_score_scale_factor}, "
               f"ranking_score_scale_factor={self.ranking_score_scale_factor}, "
               f"gpe_score_scale_factor={self.gpe_score_scale_factor}, "
+              f"group_post_edit_score_mode={self.group_post_edit_score_mode}, "
               f"rm_max_candidates={self.rm_max_candidates}")
 
     def _split_by_ability(self, data) -> Tuple[List[int], List[int], List[int]]:
@@ -881,6 +922,7 @@ class MultiTaskSelfRewardProcessor:
             overlong_buffer_cfg=self.overlong_buffer_cfg,
             enable_language_detection=self.enable_language_detection,
             indices=group_post_edit_indices,
+            score_mode=self.group_post_edit_score_mode,
         )
 
     def _process_ranking_task(self, data, ranking_indices: List[int]) -> Dict[int, float]:
