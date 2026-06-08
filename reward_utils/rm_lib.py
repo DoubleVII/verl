@@ -854,7 +854,10 @@ class MultiTaskSelfRewardProcessor:
         self.default_reward = getattr(self.config, "default_reward", 0.0)
         self.rm_max_candidates = getattr(self.config, "rm_max_candidates", 4)
         self.group_post_edit_score_mode = getattr(self.config, "group_post_edit_score_mode", "mt_group_advantage")
-        self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
+        self.mt_overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
+        self.gpe_overlong_buffer_cfg = self.config.custom_processor.get(
+            "gpe_overlong_buffer", self.mt_overlong_buffer_cfg
+        )
         self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
         if self.enable_language_detection:
             print(f"Language detection enabled")
@@ -902,7 +905,7 @@ class MultiTaskSelfRewardProcessor:
             add_example=self.add_example,
             score_scale_factor=self.mt_score_scale_factor,
             default_reward=self.default_reward,
-            overlong_buffer_cfg=self.overlong_buffer_cfg,
+            overlong_buffer_cfg=self.mt_overlong_buffer_cfg,
             enable_language_detection=self.enable_language_detection,
             indices=translation_indices,
         )
@@ -919,7 +922,7 @@ class MultiTaskSelfRewardProcessor:
             score_scale_factor=self.gpe_score_scale_factor,
             default_reward=self.default_reward,
             rm_max_candidates=self.rm_max_candidates,
-            overlong_buffer_cfg=self.overlong_buffer_cfg,
+            overlong_buffer_cfg=self.gpe_overlong_buffer_cfg,
             enable_language_detection=self.enable_language_detection,
             indices=group_post_edit_indices,
             score_mode=self.group_post_edit_score_mode,
