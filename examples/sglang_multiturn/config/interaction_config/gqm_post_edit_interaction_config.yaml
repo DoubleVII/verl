@@ -1,0 +1,4 @@
+interaction:
+  - name: "gqm_post_edit"
+    class_name: "verl.interactions.gqm_post_edit_interaction.GQMPostEditInteraction"
+    config: {}

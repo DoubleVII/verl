@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Tuple, Iterable
+from typing import Optional, List, Dict, Tuple, Iterable, Any
 
 try:
     from .helpers import (
@@ -58,6 +58,71 @@ def single_extract_score(output_text: str) -> Optional[float]:
         return None
 
 
+def _apply_response_extractor(response: str, extractor_type: str) -> Optional[str]:
+    if extractor_type == "line":
+        return _line_extractor(response)
+    if extractor_type == "codeblock":
+        return _block_extractor(response)
+    if extractor_type == "oneline":
+        return _one_line_extractor(response)
+    if extractor_type == "none":
+        response = response.strip()
+        return response if response else None
+    raise ValueError(f"extractor_type: {extractor_type}")
+
+
+def _get_obj_value(obj: Any, key: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", item.get("content", ""))))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    if isinstance(content, dict):
+        return str(content.get("text", content.get("content", "")))
+    return str(content)
+
+
+def _decode_last_assistant_response(data, input_tokenizer, extractor_type: str) -> List[Optional[str]]:
+    """Extract the final assistant message from SGLang multi-turn rollout output."""
+    fallback_responses = _decode_response(data, input_tokenizer, extractor_type)
+    message_rows = data.non_tensor_batch.get("messages", None)
+    if message_rows is None:
+        return fallback_responses
+
+    response_list: List[Optional[str]] = []
+    for idx in range(data.batch.batch_size[0]):
+        row = message_rows[idx]
+        messages = _get_obj_value(row, "messages", None)
+        if messages is None:
+            response_list.append(fallback_responses[idx])
+            continue
+
+        last_assistant = None
+        for message in messages:
+            if str(_get_obj_value(message, "role", "")).lower() == "assistant":
+                last_assistant = message
+
+        if last_assistant is None:
+            response_list.append(fallback_responses[idx])
+            continue
+
+        content = _content_to_text(_get_obj_value(last_assistant, "content", ""))
+        response_list.append(_apply_response_extractor(content, extractor_type))
+
+    return response_list
+
+
 def compute_group_translation_scores(
     data,
     generate_fn,
@@ -73,6 +138,7 @@ def compute_group_translation_scores(
     overlong_buffer_cfg,
     enable_language_detection: bool,
     indices: Optional[List[int]] = None,
+    response_texts: Optional[List[Optional[str]]] = None,
 ) -> Dict[int, float]:
     """Shared group-based translation scoring pipeline.
 
@@ -87,7 +153,7 @@ def compute_group_translation_scores(
     Returns:
         Dict mapping original batch index to score.
     """
-    responses = _decode_response(data, input_tokenizer, extractor_type)
+    responses = response_texts if response_texts is not None else _decode_response(data, input_tokenizer, extractor_type)
     extra = data.non_tensor_batch["extra_info"]
     uids = data.non_tensor_batch.get("uid", None)
     if uids is None:
@@ -234,8 +300,9 @@ def prepare_group_post_edit_inputs(
     rm_max_candidates: int,
     enable_language_detection: bool,
     indices: Optional[List[int]] = None,
+    response_texts: Optional[List[Optional[str]]] = None,
 ) -> Tuple[List[Dict[str, List[int]]], List[Dict], int]:
-    responses = _decode_response(data, input_tokenizer, extractor_type)
+    responses = response_texts if response_texts is not None else _decode_response(data, input_tokenizer, extractor_type)
     extra_info_list = data.non_tensor_batch["extra_info"]
     total_size = len(responses)
 
@@ -347,6 +414,7 @@ def compute_group_post_edit_scores(
     enable_language_detection: bool,
     indices: Optional[List[int]] = None,
     score_mode: str = "mt_group_advantage",
+    response_texts: Optional[List[Optional[str]]] = None,
 ) -> Dict[int, float]:
     if score_mode == "grpo_group_score":
         return compute_group_translation_scores(
@@ -363,6 +431,7 @@ def compute_group_post_edit_scores(
             overlong_buffer_cfg=overlong_buffer_cfg,
             enable_language_detection=enable_language_detection,
             indices=indices,
+            response_texts=response_texts,
         )
     if score_mode != "mt_group_advantage":
         raise ValueError(
@@ -382,6 +451,7 @@ def compute_group_post_edit_scores(
         rm_max_candidates=rm_max_candidates,
         enable_language_detection=enable_language_detection,
         indices=indices,
+        response_texts=response_texts,
     )
     if not prompt_list:
         return {}
@@ -871,7 +941,7 @@ class MultiTaskSelfRewardProcessor:
               f"group_post_edit_score_mode={self.group_post_edit_score_mode}, "
               f"rm_max_candidates={self.rm_max_candidates}")
 
-    def _split_by_ability(self, data) -> Tuple[List[int], List[int], List[int]]:
+    def _split_by_ability(self, data) -> Tuple[List[int], List[int], List[int], List[int]]:
         abilities = data.non_tensor_batch.get("ability", None)
         if abilities is None:
             raise ValueError("ability not found in data.non_tensor_batch")
@@ -879,6 +949,7 @@ class MultiTaskSelfRewardProcessor:
         translation_indices = []
         ranking_indices = []
         group_post_edit_indices = []
+        gqm_post_edit_indices = []
 
         for idx, ability in enumerate(abilities):
             ability_str = str(ability).strip().lower()
@@ -888,11 +959,13 @@ class MultiTaskSelfRewardProcessor:
                 ranking_indices.append(idx)
             elif ability_str == "group_post_edit":
                 group_post_edit_indices.append(idx)
+            elif ability_str == "gqm_post_edit":
+                gqm_post_edit_indices.append(idx)
             else:
                 print(f"Warning: Unknown ability type '{ability}' at index {idx}, treating as translation")
                 translation_indices.append(idx)
 
-        return translation_indices, ranking_indices, group_post_edit_indices
+        return translation_indices, ranking_indices, group_post_edit_indices, gqm_post_edit_indices
 
     def _process_translation_task(self, data, translation_indices: List[int], generate_fn) -> Dict[int, float]:
         if not translation_indices:
@@ -926,6 +999,26 @@ class MultiTaskSelfRewardProcessor:
             enable_language_detection=self.enable_language_detection,
             indices=group_post_edit_indices,
             score_mode=self.group_post_edit_score_mode,
+        )
+
+    def _process_gqm_post_edit_task(self, data, gqm_post_edit_indices: List[int], generate_fn) -> Dict[int, float]:
+        if not gqm_post_edit_indices:
+            return {}
+        post_edit_responses = _decode_last_assistant_response(data, self.input_tokenizer, self.extractor_type)
+        return compute_group_post_edit_scores(
+            data, generate_fn, self.tokenizer, self.input_tokenizer,
+            extractor_type=self.extractor_type,
+            max_prompt_length=self.max_prompt_length,
+            prompt_format=self.prompt_type,
+            add_example=self.add_example,
+            score_scale_factor=self.gpe_score_scale_factor,
+            default_reward=self.default_reward,
+            rm_max_candidates=self.rm_max_candidates,
+            overlong_buffer_cfg=self.gpe_overlong_buffer_cfg,
+            enable_language_detection=self.enable_language_detection,
+            indices=gqm_post_edit_indices,
+            score_mode=self.group_post_edit_score_mode,
+            response_texts=post_edit_responses,
         )
 
     def _process_ranking_task(self, data, ranking_indices: List[int]) -> Dict[int, float]:
@@ -989,7 +1082,7 @@ class MultiTaskSelfRewardProcessor:
 
     def compute_scores(self, data, generate_fn):
         total_size = data.batch.batch_size[0]
-        translation_indices, ranking_indices, group_post_edit_indices = self._split_by_ability(data)
+        translation_indices, ranking_indices, group_post_edit_indices, gqm_post_edit_indices = self._split_by_ability(data)
 
         final_scores: List[float] = [self.default_reward] * total_size
 
@@ -999,6 +1092,10 @@ class MultiTaskSelfRewardProcessor:
 
         group_post_edit_scores = self._process_group_post_edit_task(data, group_post_edit_indices, generate_fn)
         for idx, score in group_post_edit_scores.items():
+            final_scores[idx] = score
+
+        gqm_post_edit_scores = self._process_gqm_post_edit_task(data, gqm_post_edit_indices, generate_fn)
+        for idx, score in gqm_post_edit_scores.items():
             final_scores[idx] = score
 
         ranking_scores = self._process_ranking_task(data, ranking_indices)

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from reward_utils.rm_lib import compute_group_post_edit_scores
+from reward_utils.rm_lib import MultiTaskSelfRewardProcessor, compute_group_post_edit_scores
 
 
 class _Batch:
@@ -19,11 +19,15 @@ class _Batch:
 
 
 class _Data:
-    def __init__(self, decoded_responses, extra_info, uids=None):
+    def __init__(self, decoded_responses, extra_info, uids=None, abilities=None, messages=None):
         self.batch = _Batch([[i + 1, 0, 0] for i in range(len(decoded_responses))])
         self.non_tensor_batch = {"extra_info": extra_info}
         if uids is not None:
             self.non_tensor_batch["uid"] = uids
+        if abilities is not None:
+            self.non_tensor_batch["ability"] = abilities
+        if messages is not None:
+            self.non_tensor_batch["messages"] = messages
 
 
 class _Tokenizer:
@@ -154,3 +158,80 @@ def test_invalid_group_post_edit_score_mode_raises():
             enable_language_detection=False,
             score_mode="missing",
         )
+
+
+def test_multitask_gqm_post_edit_uses_last_assistant_message():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={"extractor_type": "codeblock"},
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["this full decoded response should be ignored"])
+    data = _Data(
+        ["unused"],
+        [_extra(["baseline"])],
+        abilities=["gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "user", "content": "gqm prompt"},
+                    {"role": "assistant", "content": "A: 1, B: 0"},
+                    {"role": "user", "content": "post edit prompt"},
+                    {"role": "assistant", "content": "analysis\n```zh\nfinal edit\n```"},
+                ]
+            }
+        ],
+    )
+
+    calls = []
+
+    def generate_fn(prompts):
+        calls.append(prompts)
+        return [_output("A: 2, B: 8")]
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, generate_fn)
+
+    assert len(calls) == 1
+    assert "final edit" in "\n".join(tokenizer.encoded_texts)
+    assert "this full decoded response should be ignored" not in "\n".join(tokenizer.encoded_texts)
+    assert scores == [pytest.approx((8 - (2 + 8) / 2) * 0.1)]
+
+
+def test_multitask_gqm_post_edit_grpo_group_score_uses_uid_group():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={"extractor_type": "codeblock"},
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="grpo_group_score",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored one", "ignored two"])
+    data = _Data(
+        ["unused one", "unused two"],
+        [_extra(["SHOULD_NOT_APPEAR"]), _extra(["SHOULD_NOT_APPEAR"])],
+        uids=["g1", "g1"],
+        abilities=["gqm_post_edit", "gqm_post_edit"],
+        messages=[
+            {"messages": [{"role": "assistant", "content": "```zh\nedit one\n```"}]},
+            {"messages": [{"role": "assistant", "content": "```zh\nedit two\n```"}]},
+        ],
+    )
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, lambda prompts: [_output("A: 3, B: 7")])
+
+    assert "SHOULD_NOT_APPEAR" not in "\n".join(tokenizer.encoded_texts)
+    assert scores == [pytest.approx(0.3), pytest.approx(0.7)]
