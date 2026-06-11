@@ -178,6 +178,16 @@ def _pre_process_inputs(
     return prompt_token_ids[non_pad_index:]
 
 
+def _normalize_interaction_kwargs(interaction_kwargs: Any) -> dict[str, Any]:
+    if interaction_kwargs is None:
+        return {}
+    if not isinstance(interaction_kwargs, dict):
+        return interaction_kwargs
+    if interaction_kwargs.get("name", None) is None:
+        return {k: v for k, v in interaction_kwargs.items() if k != "name" and v is not None}
+    return interaction_kwargs
+
+
 def _extract_logprob_from_output(output):
     """
     extract log_prob from single sglang inference output
@@ -554,7 +564,27 @@ class SGLangRollout(BaseRollout):
         if isinstance(raw_output, dict):
             raw_output = [raw_output]
 
-        return [_SGLangRequestOutput(item.get("text", "")) for item in raw_output]
+        outputs = []
+        empty_text_count = 0
+        decoded_from_ids_count = 0
+        for item in raw_output:
+            text = item.get("text", "")
+            if not text:
+                empty_text_count += 1
+                output_ids = item.get("output_ids", None)
+                if output_ids is not None:
+                    text = self.processing_class.decode(output_ids, skip_special_tokens=True)
+                    decoded_from_ids_count += 1
+            outputs.append(_SGLangRequestOutput(text))
+
+        if empty_text_count:
+            print(
+                "[SGLANG_RM_DEBUG] generate_for_rm "
+                f"empty_text={empty_text_count}/{len(raw_output)} decoded_from_ids={decoded_from_ids_count}",
+                flush=True,
+            )
+
+        return outputs
 
     def _initialize_tools(self, config, processing_class):
         """Initialize tools from configuration.
@@ -1501,7 +1531,9 @@ class SGLangRollout(BaseRollout):
                 _tool_schemas = None
 
             if self.interaction_map:
-                _interaction_kwargs = prompts.non_tensor_batch["interaction_kwargs"][data_idx]
+                _interaction_kwargs = _normalize_interaction_kwargs(
+                    prompts.non_tensor_batch["interaction_kwargs"][data_idx]
+                )
             else:
                 _interaction_kwargs = {}
 
