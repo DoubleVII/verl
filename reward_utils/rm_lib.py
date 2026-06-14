@@ -155,13 +155,17 @@ def compute_group_translation_scores(
     """
     responses = response_texts if response_texts is not None else _decode_response(data, input_tokenizer, extractor_type)
     extra = data.non_tensor_batch["extra_info"]
+
+    if indices is None:
+        indices = list(range(len(responses)))
+    if not indices:
+        generate_fn([])
+        return {}
+
     uids = data.non_tensor_batch.get("uid", None)
     if uids is None:
         raise ValueError("uid not found in batch")
     uids = list(uids)
-
-    if indices is None:
-        indices = list(range(len(responses)))
 
     # Group indices by uid
     groups: Dict[str, List[int]] = {}
@@ -262,8 +266,8 @@ def compute_group_translation_scores(
     scores_dict: Dict[int, float] = {}
     reward_failed_count = 0
 
+    outputs = generate_fn(prompt_list)
     if prompt_list:
-        outputs = generate_fn(prompt_list)
         for j, output in enumerate(outputs):
             text = output.outputs[0].text
             group_info = kept_groups[j]
@@ -453,9 +457,9 @@ def compute_group_post_edit_scores(
         indices=indices,
         response_texts=response_texts,
     )
+    outputs = generate_fn(prompt_list)
     if not prompt_list:
         return {}
-    outputs = generate_fn(prompt_list)
     return process_group_post_edit_outputs(
         outputs,
         kept_info,
@@ -968,8 +972,6 @@ class MultiTaskSelfRewardProcessor:
         return translation_indices, ranking_indices, group_post_edit_indices, gqm_post_edit_indices
 
     def _process_translation_task(self, data, translation_indices: List[int], generate_fn) -> Dict[int, float]:
-        if not translation_indices:
-            return {}
         return compute_group_translation_scores(
             data, generate_fn, self.tokenizer, self.input_tokenizer,
             extractor_type=self.extractor_type,
@@ -984,8 +986,6 @@ class MultiTaskSelfRewardProcessor:
         )
 
     def _process_group_post_edit_task(self, data, group_post_edit_indices: List[int], generate_fn) -> Dict[int, float]:
-        if not group_post_edit_indices:
-            return {}
         return compute_group_post_edit_scores(
             data, generate_fn, self.tokenizer, self.input_tokenizer,
             extractor_type=self.extractor_type,
@@ -1002,8 +1002,6 @@ class MultiTaskSelfRewardProcessor:
         )
 
     def _process_gqm_post_edit_task(self, data, gqm_post_edit_indices: List[int], generate_fn) -> Dict[int, float]:
-        if not gqm_post_edit_indices:
-            return {}
         post_edit_responses = _decode_last_assistant_response(data, self.input_tokenizer, self.extractor_type)
         return compute_group_post_edit_scores(
             data, generate_fn, self.tokenizer, self.input_tokenizer,

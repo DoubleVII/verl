@@ -534,29 +534,30 @@ class SGLangRollout(BaseRollout):
         Returns outputs in vLLM-compatible format where each output has
         .outputs[0].text attribute.
         """
-        if not prompt_list:
-            return []
-
         input_ids_list = [item["prompt_token_ids"] for item in prompt_list]
         sampling_params = self.sampling_params.copy()
+        tp_group = self._device_mesh_cpu["tp"].get_group()
 
         if self._tp_rank == 0:
-            loop = asyncio.get_event_loop()
-            raw_output = loop.run_until_complete(
-                self._engine.async_generate(
-                    prompt=None,
-                    sampling_params=sampling_params,
-                    input_ids=input_ids_list,
+            if input_ids_list:
+                loop = asyncio.get_event_loop()
+                raw_output = loop.run_until_complete(
+                    self._engine.async_generate(
+                        prompt=None,
+                        sampling_params=sampling_params,
+                        input_ids=input_ids_list,
+                    )
                 )
-            )
+            else:
+                raw_output = []
         else:
             raw_output = None
 
-        dist.barrier()
+        dist.barrier(group=tp_group)
         [raw_output] = broadcast_pyobj(
             data=[raw_output],
             rank=self._rank,
-            dist_group=self._device_mesh_cpu["tp"].get_group(),
+            dist_group=tp_group,
             src=self._device_mesh_cpu["tp"].mesh[0].item(),
             force_cpu_device=False,
         )

@@ -199,7 +199,7 @@ def test_multitask_gqm_post_edit_uses_last_assistant_message():
     processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
     scores = processor.compute_scores(data, generate_fn)
 
-    assert len(calls) == 1
+    assert [len(call) for call in calls] == [0, 0, 1]
     assert "final edit" in "\n".join(tokenizer.encoded_texts)
     assert "this full decoded response should be ignored" not in "\n".join(tokenizer.encoded_texts)
     assert scores == [pytest.approx((8 - (2 + 8) / 2) * 0.1)]
@@ -235,3 +235,145 @@ def test_multitask_gqm_post_edit_grpo_group_score_uses_uid_group():
 
     assert "SHOULD_NOT_APPEAR" not in "\n".join(tokenizer.encoded_texts)
     assert scores == [pytest.approx(0.3), pytest.approx(0.7)]
+
+
+def _multitask_config(prompt_length=1000, score_mode="mt_group_advantage"):
+    return SimpleNamespace(
+        prompt_length=prompt_length,
+        custom_processor={"extractor_type": "none"},
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        mt_score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode=score_mode,
+        ranking_score_scale_factor=0.1,
+    )
+
+
+def _ranking_extra():
+    return {
+        "src_text": "source",
+        "src_lang": "English",
+        "trg_lang": "Chinese",
+    }
+
+
+def test_multitask_pure_ranking_still_calls_empty_generation_stages():
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["reasoning\nRanking:\nA > B\nScore:\nA: 2, B: 1"])
+    data = _Data(
+        ["unused"],
+        [_ranking_extra()],
+        uids=["rank-1"],
+        abilities=["ranking"],
+        messages=[{"messages": []}],
+    )
+    data.non_tensor_batch["reward_model"] = [{"ground_truth": '{"A": 2, "B": 1}'}]
+    calls = []
+
+    def generate_fn(prompts):
+        calls.append(prompts)
+        return []
+
+    processor = MultiTaskSelfRewardProcessor(
+        config=_multitask_config(),
+        tokenizer=tokenizer,
+        input_tokenizer=input_tokenizer,
+    )
+    scores = processor.compute_scores(data, generate_fn)
+
+    assert calls == [[], [], []]
+    assert scores == [pytest.approx(0.2)]
+
+
+def test_multitask_mixed_batch_with_gpe_prompts_keeps_fixed_generation_order():
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored ranking", "post edit"])
+    data = _Data(
+        ["unused ranking", "unused gpe"],
+        [_ranking_extra(), _extra(["baseline"])],
+        uids=["rank-1", "gpe-1"],
+        abilities=["ranking", "gqm_post_edit"],
+        messages=[
+            {"messages": []},
+            {"messages": [{"role": "assistant", "content": "post edit"}]},
+        ],
+    )
+    calls = []
+
+    def generate_fn(prompts):
+        calls.append(prompts)
+        if prompts:
+            return [_output("A: 2, B: 8")]
+        return []
+
+    processor = MultiTaskSelfRewardProcessor(
+        config=_multitask_config(),
+        tokenizer=tokenizer,
+        input_tokenizer=input_tokenizer,
+    )
+    scores = processor.compute_scores(data, generate_fn)
+
+    assert [len(call) for call in calls] == [0, 0, 1]
+    assert scores[0] == pytest.approx(-1.0)
+    assert scores[1] == pytest.approx((8 - (2 + 8) / 2) * 0.1)
+
+
+def test_multitask_mixed_batch_without_local_gpe_prompts_calls_empty_gpe_stage():
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["translation output"])
+    data = _Data(
+        ["unused"],
+        [_extra()],
+        uids=["translation-1"],
+        abilities=["translation"],
+        messages=[{"messages": []}],
+    )
+    calls = []
+
+    def generate_fn(prompts):
+        calls.append(prompts)
+        return []
+
+    processor = MultiTaskSelfRewardProcessor(
+        config=_multitask_config(score_mode="grpo_group_score"),
+        tokenizer=tokenizer,
+        input_tokenizer=input_tokenizer,
+    )
+    scores = processor.compute_scores(data, generate_fn)
+
+    assert calls == [[], [], []]
+    assert scores == [-1.0]
+
+
+def test_group_post_edit_filtered_empty_prompt_still_calls_generate_fn():
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["post edit"])
+    data = _Data(
+        ["unused"],
+        [_extra(["baseline"])],
+        uids=["gpe-1"],
+    )
+    calls = []
+
+    scores = compute_group_post_edit_scores(
+        data,
+        lambda prompts: calls.append(prompts) or [],
+        tokenizer,
+        input_tokenizer,
+        extractor_type="none",
+        max_prompt_length=0,
+        prompt_format="ranking_score",
+        add_example=False,
+        score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        overlong_buffer_cfg=None,
+        enable_language_detection=False,
+    )
+
+    assert calls == [[]]
+    assert scores == {}
