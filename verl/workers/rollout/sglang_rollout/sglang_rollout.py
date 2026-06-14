@@ -380,6 +380,12 @@ class SGLangRollout(BaseRollout):
     def _verify_config(self, model_hf_config):
         if not self.config.get("max_model_len", None):
             self.config.max_model_len = self.config.prompt_length + self.config.response_length
+        response_mask_mode = self.config.multi_turn.response_mask_mode
+        if response_mask_mode not in {"all_assistant", "last_assistant"}:
+            raise ValueError(
+                f"Unsupported multi_turn.response_mask_mode: {response_mask_mode}. "
+                "Expected one of: all_assistant, last_assistant."
+            )
         assert (
             self.config.max_model_len >= self.config.prompt_length + self.config.response_length
         ), f"""max_model_len should be greater than total sequence length (prompt_length + response_length): 
@@ -1117,7 +1123,12 @@ class SGLangRollout(BaseRollout):
         tool_reward_scores = await asyncio.gather(*tool_reward_tasks)
         tool_reward_scores = dict(tool_reward_scores)
         all_rewards = {**tool_reward_scores, **{"user_turn_rewards": user_turn_rewards}}
-        _req.finalize(self.processing_class, all_rewards, finish_reason_type)
+        _req.finalize(
+            self.processing_class,
+            all_rewards,
+            finish_reason_type,
+            response_mask_mode=self.config.multi_turn.response_mask_mode,
+        )
 
         if self.config.calculate_log_probs:
             debug_sampling_params = {**self.sampling_params}

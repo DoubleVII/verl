@@ -186,6 +186,10 @@ multi_turn:
   # - ignore_strippable: ignore strippable tokens when checking tokenization sanity
   tokenization_sanity_check_mode: strict
 
+  # Which assistant tokens should be trainable in multi-turn rollout.
+  # all_assistant keeps the original behavior; last_assistant trains only on the final assistant turn.
+  response_mask_mode: all_assistant
+
   # Format of the multi-turn interaction. Options: hermes, llama3_json, ...
   format: hermes
 

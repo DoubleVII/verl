@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Any, Optional
 
 import torch
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin
 
 from verl.tools.schemas import OpenAIFunctionToolCall, OpenAIFunctionToolSchema, ToolResponse
@@ -113,6 +113,7 @@ class AsyncRolloutRequest(BaseModel):
     metrics: dict[str, list[Any]] = {}
     output_token_ids: torch.Tensor | None = None
     rollout_log_probs: torch.Tensor | None = None
+    assistant_token_spans: list[tuple[int, int]] = Field(default_factory=list)
 
     use_inference_chat_template: bool
     tokenization_sanity_check_mode: TokenizationSanityCheckModeEnum
@@ -409,7 +410,9 @@ class AsyncRolloutRequest(BaseModel):
             content_ids = self._handle_apply_chat_template(
                 processing_class, messages, multi_modal_data={}, tools=tools, add_generation_prompt=False, tokenize=True
             )[..., self.base_conv_with_gen_prompt_end_pos :]
+        span_start = self.input_ids.shape[-1]
         self._update_input_ids(processing_class, content_ids, attention_mask=True, loss_mask=True)
+        self.assistant_token_spans.append((span_start, self.input_ids.shape[-1]))
 
     def add_tool_response_messages(
         self,
@@ -553,7 +556,13 @@ class AsyncRolloutRequest(BaseModel):
         processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
         reward_scores: dict[str, list[float]],
         finish_reason_type: FinishReasonTypeEnum = FinishReasonTypeEnum.STOP,
+        response_mask_mode: str = "all_assistant",
     ) -> None:
+        if response_mask_mode not in {"all_assistant", "last_assistant"}:
+            raise ValueError(
+                f"Unsupported response_mask_mode: {response_mask_mode}. "
+                "Expected one of: all_assistant, last_assistant."
+            )
         self.state = AsyncRolloutRequestStateEnum.COMPLETED
         self.reward_scores = reward_scores
 
@@ -647,6 +656,9 @@ class AsyncRolloutRequest(BaseModel):
             raise ValueError(f"Unsupported finalize finish reason type: {finish_reason_type}")
         self.truncate_output_ids(processing_class)
 
+        if response_mask_mode == "last_assistant":
+            self._mask_only_last_assistant_turn()
+
         assert (
             self.input_ids.shape[-1]
             == self.attention_mask.shape[-1]
@@ -669,4 +681,20 @@ class AsyncRolloutRequest(BaseModel):
         self.response_position_ids = self.position_ids[..., self.prompt_position_ids.shape[-1] :][
             ..., : self.max_response_len
         ]
+        self.response_loss_mask = self.loss_mask[..., self.prompt_loss_mask.shape[-1] :][..., : self.max_response_len]
+
+    def _mask_only_last_assistant_turn(self) -> None:
+        if not self.assistant_token_spans:
+            self.loss_mask = torch.zeros_like(self.loss_mask)
+            self.response_loss_mask = torch.zeros_like(self.response_loss_mask)
+            return
+
+        span_start, span_end = self.assistant_token_spans[-1]
+        visible_start = min(max(span_start, 0), self.input_ids.shape[-1])
+        visible_end = min(max(span_end, 0), self.input_ids.shape[-1])
+
+        self.loss_mask = torch.zeros_like(self.loss_mask)
+        if visible_end > visible_start:
+            self.loss_mask[..., visible_start:visible_end] = 1
+
         self.response_loss_mask = self.loss_mask[..., self.prompt_loss_mask.shape[-1] :][..., : self.max_response_len]
