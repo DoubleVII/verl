@@ -1149,6 +1149,14 @@ class MultiTaskSelfRewardProcessor:
                 overlong_buffer_cfg=self.gpe_overlong_buffer_cfg,
                 enable_language_detection=self.enable_language_detection,
             )
+            skipped_count = len(scores_dict)
+            total_count = len(gqm_post_edit_indices)
+            skipped_ratio = skipped_count / total_count if total_count else 0.0
+            print(
+                "[GQM_GPE_FAST_PATH] "
+                f"skipped={skipped_count}/{total_count} "
+                f"ratio={skipped_ratio:.2%}"
+            )
 
         fallback_scores = compute_group_post_edit_scores(
             data, generate_fn, self.tokenizer, self.input_tokenizer,
