@@ -86,6 +86,38 @@ def test_default_mode_keeps_mt_group_advantage_without_reward_scale():
     assert scores == {0: pytest.approx((8 - (2 + 4 + 8) / 3) * 0.5)}
 
 
+def test_group_post_edit_dedupes_duplicate_post_edit_and_tracks_score_index():
+    input_tokenizer = _Tokenizer(["baseline two"])
+    tokenizer = _Tokenizer()
+    data = _Data(["baseline two"], [_extra(["baseline one", "baseline two"])])
+    calls = []
+
+    def generate_fn(prompts):
+        calls.append(prompts)
+        return [_output("A: 2, B: 8")]
+
+    scores = compute_group_post_edit_scores(
+        data,
+        generate_fn,
+        tokenizer,
+        input_tokenizer,
+        extractor_type="none",
+        max_prompt_length=1000,
+        prompt_format="ranking_score",
+        add_example=False,
+        score_scale_factor=0.5,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        overlong_buffer_cfg=None,
+        enable_language_detection=False,
+    )
+
+    encoded = "\n".join(tokenizer.encoded_texts)
+    assert len(calls[0]) == 1
+    assert encoded.count("baseline two") == 1
+    assert scores == {0: pytest.approx((8 - (2 + 8) / 2) * 0.5)}
+
+
 def test_grpo_group_score_scores_once_per_uid_and_ignores_mt_texts():
     decoded = ["same edit", "same edit", "worse edit", "other edit", "best edit"]
     input_tokenizer = _Tokenizer(decoded)
@@ -203,6 +235,187 @@ def test_multitask_gqm_post_edit_uses_last_assistant_message():
     assert "final edit" in "\n".join(tokenizer.encoded_texts)
     assert "this full decoded response should be ignored" not in "\n".join(tokenizer.encoded_texts)
     assert scores == [pytest.approx((8 - (2 + 8) / 2) * 0.1)]
+
+
+def test_multitask_gqm_post_edit_reuse_first_turn_scores_default_off():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={"extractor_type": "codeblock"},
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored full response"])
+    data = _Data(
+        ["unused"],
+        [_extra(["candidate one", "candidate two"])],
+        abilities=["gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 2, B: 8"},
+                    {"role": "assistant", "content": "```zh\ncandidate two\n```"},
+                ]
+            }
+        ],
+    )
+    calls = []
+
+    def generate_fn(prompts):
+        calls.append(prompts)
+        return [_output("A: 1, B: 9")]
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, generate_fn)
+
+    assert [len(call) for call in calls] == [0, 0, 1]
+    assert scores == [pytest.approx((9 - (1 + 9) / 2) * 0.1)]
+
+
+def test_multitask_gqm_post_edit_reuses_first_turn_scores_for_duplicate_post_edit():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": True,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored full response"])
+    data = _Data(
+        ["unused"],
+        [_extra(["candidate one", "candidate two"])],
+        abilities=["gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "assistant", "content": "Analysis\nA: 2, B: 8"},
+                    {"role": "assistant", "content": "```zh\n candidate two \n```"},
+                ]
+            }
+        ],
+    )
+    calls = []
+
+    def generate_fn(prompts):
+        calls.append(prompts)
+        return []
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, generate_fn)
+
+    assert calls == [[], [], []]
+    assert tokenizer.encoded_texts == []
+    assert scores == [pytest.approx((8 - (2 + 8) / 2) * 0.1)]
+
+
+def test_multitask_gqm_post_edit_reuse_falls_back_when_first_turn_parse_fails():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": True,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored full response"])
+    data = _Data(
+        ["unused"],
+        [_extra(["candidate one", "candidate two"])],
+        abilities=["gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "assistant", "content": "not parseable"},
+                    {"role": "assistant", "content": "```zh\ncandidate two\n```"},
+                ]
+            }
+        ],
+    )
+    calls = []
+
+    def generate_fn(prompts):
+        calls.append(prompts)
+        return [_output("A: 1, B: 9")]
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, generate_fn)
+
+    assert [len(call) for call in calls] == [0, 0, 1]
+    assert scores == [pytest.approx((9 - (1 + 9) / 2) * 0.1)]
+
+
+def test_multitask_gqm_post_edit_reuse_scores_only_duplicates_and_falls_back_for_others():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": True,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored one", "ignored two"])
+    data = _Data(
+        ["unused one", "unused two"],
+        [_extra(["candidate one", "candidate two"]), _extra(["baseline one", "baseline two"])],
+        abilities=["gqm_post_edit", "gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 2, B: 8"},
+                    {"role": "assistant", "content": "```zh\ncandidate two\n```"},
+                ]
+            },
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 7, B: 3"},
+                    {"role": "assistant", "content": "```zh\nnew edit\n```"},
+                ]
+            },
+        ],
+    )
+    calls = []
+
+    def generate_fn(prompts):
+        calls.append(prompts)
+        return [_output("A: 1, B: 3, C: 9")]
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, generate_fn)
+
+    assert [len(call) for call in calls] == [0, 0, 1]
+    assert "new edit" in "\n".join(tokenizer.encoded_texts)
+    assert "candidate two" not in "\n".join(tokenizer.encoded_texts)
+    assert scores == [
+        pytest.approx((8 - (2 + 8) / 2) * 0.1),
+        pytest.approx((9 - (1 + 3 + 9) / 3) * 0.1),
+    ]
 
 
 def test_multitask_gqm_post_edit_grpo_group_score_uses_uid_group():

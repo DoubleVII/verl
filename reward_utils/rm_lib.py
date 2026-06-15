@@ -123,6 +123,125 @@ def _decode_last_assistant_response(data, input_tokenizer, extractor_type: str) 
     return response_list
 
 
+def _extract_assistant_turn_text(data, turn_idx: int) -> List[Optional[str]]:
+    """Extract raw assistant message content by assistant-turn index from stored chat messages."""
+    message_rows = data.non_tensor_batch.get("messages", None)
+    total_size = data.batch.batch_size[0]
+    if message_rows is None:
+        return [None] * total_size
+
+    response_list: List[Optional[str]] = []
+    for idx in range(total_size):
+        row = message_rows[idx]
+        messages = _get_obj_value(row, "messages", None)
+        if messages is None:
+            response_list.append(None)
+            continue
+
+        assistant_texts = []
+        for message in messages:
+            if str(_get_obj_value(message, "role", "")).lower() == "assistant":
+                assistant_texts.append(_content_to_text(_get_obj_value(message, "content", "")))
+
+        if turn_idx < len(assistant_texts):
+            response_list.append(assistant_texts[turn_idx])
+        else:
+            response_list.append(None)
+
+    return response_list
+
+
+def _normalize_duplicate_text(text: str) -> str:
+    return text.strip()
+
+
+def _get_response_valid_len(data, idx: int) -> int:
+    response_ids = data.batch["responses"][idx]
+    resp_len = response_ids.shape[-1]
+    valid_len = data.batch["attention_mask"][idx][-resp_len:].sum()
+    try:
+        return int(valid_len)
+    except Exception:
+        return resp_len
+
+
+def _dedupe_texts_with_index(texts: List[str], target_idx: int) -> Tuple[List[str], int]:
+    seen: Dict[str, int] = {}
+    unique_texts: List[str] = []
+    target_text = _normalize_duplicate_text(texts[target_idx])
+    target_unique_idx = 0
+
+    for text in texts:
+        key = _normalize_duplicate_text(text)
+        if key not in seen:
+            seen[key] = len(unique_texts)
+            unique_texts.append(text)
+        if key == target_text:
+            target_unique_idx = seen[key]
+
+    return unique_texts, target_unique_idx
+
+
+def _try_score_gqm_post_edit_from_first_turn(
+    data,
+    *,
+    indices: List[int],
+    post_edit_responses: List[Optional[str]],
+    prompt_format: str,
+    score_scale_factor: float,
+    overlong_buffer_cfg,
+    enable_language_detection: bool,
+) -> Tuple[Dict[int, float], List[int]]:
+    first_turn_responses = _extract_assistant_turn_text(data, 0)
+    extra_info_list = data.non_tensor_batch["extra_info"]
+    scores_dict: Dict[int, float] = {}
+    remaining_indices: List[int] = []
+
+    for idx in indices:
+        pe_mt_text = post_edit_responses[idx]
+        if pe_mt_text is None:
+            remaining_indices.append(idx)
+            continue
+
+        extra = extra_info_list[idx]
+        if enable_language_detection:
+            _, tgt_lang = _get_lang_pair(extra)
+            if not is_language_match(pe_mt_text, tgt_lang):
+                remaining_indices.append(idx)
+                continue
+
+        raw_mt_texts = extra_info_list[idx].get("mt_texts", [])
+        mt_texts = [] if raw_mt_texts is None else list(raw_mt_texts)
+        pe_key = _normalize_duplicate_text(pe_mt_text)
+        match_idx = None
+        for candidate_idx, mt_text in enumerate(mt_texts):
+            if _normalize_duplicate_text(str(mt_text)) == pe_key:
+                match_idx = candidate_idx
+                break
+
+        if match_idx is None:
+            remaining_indices.append(idx)
+            continue
+
+        first_turn = first_turn_responses[idx]
+        if first_turn is None:
+            remaining_indices.append(idx)
+            continue
+
+        candidate_scores = group_extract_scores(first_turn, prompt_format, len(mt_texts))
+        if candidate_scores is None:
+            remaining_indices.append(idx)
+            continue
+
+        pe_mt_score = candidate_scores[match_idx]
+        mean_all = sum(candidate_scores) / len(candidate_scores)
+        relative_reward = (pe_mt_score - mean_all) * score_scale_factor
+        penalty = _compute_overlong_penalty(_get_response_valid_len(data, idx), overlong_buffer_cfg)
+        scores_dict[idx] = relative_reward - penalty
+
+    return scores_dict, remaining_indices
+
+
 def compute_group_translation_scores(
     data,
     generate_fn,
@@ -338,6 +457,7 @@ def prepare_group_post_edit_inputs(
             mt_texts = mt_texts[: rm_max_candidates - 1]
 
         all_mt_texts = mt_texts + [pe_mt_text]
+        all_mt_texts, pe_score_idx = _dedupe_texts_with_index(all_mt_texts, len(all_mt_texts) - 1)
         num_candidates = len(all_mt_texts)
         if num_candidates < 2:
             continue
@@ -360,15 +480,14 @@ def prepare_group_post_edit_inputs(
         if len(raw_ids) > max_prompt_length:
             continue
 
-        response_ids = data.batch["responses"][idx]
-        resp_len = response_ids.shape[-1]
-        valid_len = data.batch["attention_mask"][idx][-resp_len:].sum()
-        try:
-            candidate_len = int(valid_len)
-        except Exception:
-            candidate_len = resp_len
+        candidate_len = _get_response_valid_len(data, idx)
 
-        kept_info.append({"orig_idx": idx, "num_candidates": num_candidates, "response_len": candidate_len})
+        kept_info.append({
+            "orig_idx": idx,
+            "num_candidates": num_candidates,
+            "pe_score_idx": pe_score_idx,
+            "response_len": candidate_len,
+        })
         prompt_list.append({"prompt_token_ids": raw_ids})
 
     return prompt_list, kept_info, total_size
@@ -389,11 +508,12 @@ def process_group_post_edit_outputs(
         info = kept_info[j]
         num_candidates = info["num_candidates"]
         orig_idx = info["orig_idx"]
+        pe_score_idx = info.get("pe_score_idx", num_candidates - 1)
         scores = group_extract_scores(text, prompt_format, num_candidates)
         if scores is None:
             scores_dict[orig_idx] = default_reward
             continue
-        pe_mt_score = scores[-1]
+        pe_mt_score = scores[pe_score_idx]
         mean_all = sum(scores) / len(scores)
         relative_reward = (pe_mt_score - mean_all) * score_scale_factor
         penalty = _compute_overlong_penalty(info["response_len"], overlong_buffer_cfg)
@@ -933,6 +1053,9 @@ class MultiTaskSelfRewardProcessor:
             "gpe_overlong_buffer", self.mt_overlong_buffer_cfg
         )
         self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
+        self.reuse_gqm_post_edit_first_turn_scores = self.config.custom_processor.get(
+            "reuse_gqm_post_edit_first_turn_scores", False
+        )
         if self.enable_language_detection:
             print(f"Language detection enabled")
 
@@ -943,7 +1066,8 @@ class MultiTaskSelfRewardProcessor:
               f"ranking_score_scale_factor={self.ranking_score_scale_factor}, "
               f"gpe_score_scale_factor={self.gpe_score_scale_factor}, "
               f"group_post_edit_score_mode={self.group_post_edit_score_mode}, "
-              f"rm_max_candidates={self.rm_max_candidates}")
+              f"rm_max_candidates={self.rm_max_candidates}, "
+              f"reuse_gqm_post_edit_first_turn_scores={self.reuse_gqm_post_edit_first_turn_scores}")
 
     def _split_by_ability(self, data) -> Tuple[List[int], List[int], List[int], List[int]]:
         abilities = data.non_tensor_batch.get("ability", None)
@@ -1003,7 +1127,20 @@ class MultiTaskSelfRewardProcessor:
 
     def _process_gqm_post_edit_task(self, data, gqm_post_edit_indices: List[int], generate_fn) -> Dict[int, float]:
         post_edit_responses = _decode_last_assistant_response(data, self.input_tokenizer, self.extractor_type)
-        return compute_group_post_edit_scores(
+        scores_dict: Dict[int, float] = {}
+        remaining_indices = gqm_post_edit_indices
+        if self.reuse_gqm_post_edit_first_turn_scores and self.group_post_edit_score_mode == "mt_group_advantage":
+            scores_dict, remaining_indices = _try_score_gqm_post_edit_from_first_turn(
+                data,
+                indices=gqm_post_edit_indices,
+                post_edit_responses=post_edit_responses,
+                prompt_format=self.prompt_type,
+                score_scale_factor=self.gpe_score_scale_factor,
+                overlong_buffer_cfg=self.gpe_overlong_buffer_cfg,
+                enable_language_detection=self.enable_language_detection,
+            )
+
+        fallback_scores = compute_group_post_edit_scores(
             data, generate_fn, self.tokenizer, self.input_tokenizer,
             extractor_type=self.extractor_type,
             max_prompt_length=self.max_prompt_length,
@@ -1014,10 +1151,12 @@ class MultiTaskSelfRewardProcessor:
             rm_max_candidates=self.rm_max_candidates,
             overlong_buffer_cfg=self.gpe_overlong_buffer_cfg,
             enable_language_detection=self.enable_language_detection,
-            indices=gqm_post_edit_indices,
+            indices=remaining_indices,
             score_mode=self.group_post_edit_score_mode,
             response_texts=post_edit_responses,
         )
+        scores_dict.update(fallback_scores)
+        return scores_dict
 
     def _process_ranking_task(self, data, ranking_indices: List[int]) -> Dict[int, float]:
         if not ranking_indices:
