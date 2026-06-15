@@ -83,7 +83,7 @@ def test_default_mode_keeps_mt_group_advantage_without_reward_scale():
         enable_language_detection=False,
     )
 
-    assert scores == {0: pytest.approx((8 - (2 + 4 + 8) / 3) * 0.5)}
+    assert scores == {0: pytest.approx((8 - (2 + 4) / 2) * 0.5)}
 
 
 def test_group_post_edit_dedupes_duplicate_post_edit_and_tracks_score_index():
@@ -116,6 +116,30 @@ def test_group_post_edit_dedupes_duplicate_post_edit_and_tracks_score_index():
     assert len(calls[0]) == 1
     assert encoded.count("baseline two") == 1
     assert scores == {0: pytest.approx((8 - (2 + 8) / 2) * 0.5)}
+
+
+def test_group_post_edit_duplicate_post_edit_mean_excludes_post_edit_copy():
+    input_tokenizer = _Tokenizer(["candidate three"])
+    tokenizer = _Tokenizer()
+    data = _Data(["candidate three"], [_extra(["candidate one", "candidate two", "candidate three"])])
+
+    scores = compute_group_post_edit_scores(
+        data,
+        lambda prompts: [_output("A: 6, B: 7, C: 8")],
+        tokenizer,
+        input_tokenizer,
+        extractor_type="none",
+        max_prompt_length=1000,
+        prompt_format="ranking_score",
+        add_example=False,
+        score_scale_factor=1.0,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        overlong_buffer_cfg=None,
+        enable_language_detection=False,
+    )
+
+    assert scores == {0: pytest.approx(8 - (6 + 7 + 8) / 3)}
 
 
 def test_grpo_group_score_scores_once_per_uid_and_ignores_mt_texts():
@@ -234,7 +258,7 @@ def test_multitask_gqm_post_edit_uses_last_assistant_message():
     assert [len(call) for call in calls] == [0, 0, 1]
     assert "final edit" in "\n".join(tokenizer.encoded_texts)
     assert "this full decoded response should be ignored" not in "\n".join(tokenizer.encoded_texts)
-    assert scores == [pytest.approx((8 - (2 + 8) / 2) * 0.1)]
+    assert scores == [pytest.approx((8 - 2) * 0.1)]
 
 
 def test_multitask_gqm_post_edit_reuse_first_turn_scores_default_off():
@@ -414,7 +438,7 @@ def test_multitask_gqm_post_edit_reuse_scores_only_duplicates_and_falls_back_for
     assert "candidate two" not in "\n".join(tokenizer.encoded_texts)
     assert scores == [
         pytest.approx((8 - (2 + 8) / 2) * 0.1),
-        pytest.approx((9 - (1 + 3 + 9) / 3) * 0.1),
+        pytest.approx((9 - (1 + 3) / 2) * 0.1),
     ]
 
 
@@ -532,7 +556,7 @@ def test_multitask_mixed_batch_with_gpe_prompts_keeps_fixed_generation_order():
 
     assert [len(call) for call in calls] == [0, 0, 1]
     assert scores[0] == pytest.approx(-1.0)
-    assert scores[1] == pytest.approx((8 - (2 + 8) / 2) * 0.1)
+    assert scores[1] == pytest.approx((8 - 2) * 0.1)
 
 
 def test_multitask_mixed_batch_without_local_gpe_prompts_calls_empty_gpe_stage():

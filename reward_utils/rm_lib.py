@@ -165,9 +165,10 @@ def _get_response_valid_len(data, idx: int) -> int:
         return resp_len
 
 
-def _dedupe_texts_with_index(texts: List[str], target_idx: int) -> Tuple[List[str], int]:
+def _dedupe_texts_with_index(texts: List[str], target_idx: int) -> Tuple[List[str], int, List[int]]:
     seen: Dict[str, int] = {}
     unique_texts: List[str] = []
+    score_indices: List[int] = []
     target_text = _normalize_duplicate_text(texts[target_idx])
     target_unique_idx = 0
 
@@ -176,10 +177,11 @@ def _dedupe_texts_with_index(texts: List[str], target_idx: int) -> Tuple[List[st
         if key not in seen:
             seen[key] = len(unique_texts)
             unique_texts.append(text)
+        score_indices.append(seen[key])
         if key == target_text:
             target_unique_idx = seen[key]
 
-    return unique_texts, target_unique_idx
+    return unique_texts, target_unique_idx, score_indices
 
 
 def _try_score_gqm_post_edit_from_first_turn(
@@ -189,6 +191,7 @@ def _try_score_gqm_post_edit_from_first_turn(
     post_edit_responses: List[Optional[str]],
     prompt_format: str,
     score_scale_factor: float,
+    rm_max_candidates: int,
     overlong_buffer_cfg,
     enable_language_detection: bool,
 ) -> Tuple[Dict[int, float], List[int]]:
@@ -212,6 +215,9 @@ def _try_score_gqm_post_edit_from_first_turn(
 
         raw_mt_texts = extra_info_list[idx].get("mt_texts", [])
         mt_texts = [] if raw_mt_texts is None else list(raw_mt_texts)
+        if 1 + len(mt_texts) > rm_max_candidates:
+            mt_texts = mt_texts[: rm_max_candidates - 1]
+
         pe_key = _normalize_duplicate_text(pe_mt_text)
         match_idx = None
         for candidate_idx, mt_text in enumerate(mt_texts):
@@ -457,7 +463,7 @@ def prepare_group_post_edit_inputs(
             mt_texts = mt_texts[: rm_max_candidates - 1]
 
         all_mt_texts = mt_texts + [pe_mt_text]
-        all_mt_texts, pe_score_idx = _dedupe_texts_with_index(all_mt_texts, len(all_mt_texts) - 1)
+        all_mt_texts, pe_score_idx, score_indices = _dedupe_texts_with_index(all_mt_texts, len(all_mt_texts) - 1)
         num_candidates = len(all_mt_texts)
         if num_candidates < 2:
             continue
@@ -486,6 +492,7 @@ def prepare_group_post_edit_inputs(
             "orig_idx": idx,
             "num_candidates": num_candidates,
             "pe_score_idx": pe_score_idx,
+            "score_indices": score_indices,
             "response_len": candidate_len,
         })
         prompt_list.append({"prompt_token_ids": raw_ids})
@@ -514,7 +521,9 @@ def process_group_post_edit_outputs(
             scores_dict[orig_idx] = default_reward
             continue
         pe_mt_score = scores[pe_score_idx]
-        mean_all = sum(scores) / len(scores)
+        score_indices = info.get("score_indices", list(range(num_candidates)))
+        mean_scores = [scores[score_idx] for score_idx in score_indices[:-1]]
+        mean_all = sum(mean_scores) / len(mean_scores)
         relative_reward = (pe_mt_score - mean_all) * score_scale_factor
         penalty = _compute_overlong_penalty(info["response_len"], overlong_buffer_cfg)
         scores_dict[orig_idx] = relative_reward - penalty
@@ -1136,6 +1145,7 @@ class MultiTaskSelfRewardProcessor:
                 post_edit_responses=post_edit_responses,
                 prompt_format=self.prompt_type,
                 score_scale_factor=self.gpe_score_scale_factor,
+                rm_max_candidates=self.rm_max_candidates,
                 overlong_buffer_cfg=self.gpe_overlong_buffer_cfg,
                 enable_language_detection=self.enable_language_detection,
             )
