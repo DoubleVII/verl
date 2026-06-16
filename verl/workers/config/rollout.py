@@ -54,6 +54,7 @@ class MultiTurnConfig(BaseConfig):
     interaction_config_path: Optional[str] = None
     use_inference_chat_template: bool = False
     tokenization_sanity_check_mode: str = "strict"
+    response_mask_mode: str = "all_assistant"
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None
 
