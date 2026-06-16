@@ -196,6 +196,10 @@ multi_turn:
   # Number of repeat rollouts for each interaction
   num_repeat_rollouts: null
 
+  # Experimental: for GQM+GPE, generate the first assistant turn once per uid,
+  # then fork N second-turn post-edit rollouts from that shared conversation.
+  shared_first_turn_by_uid: False
+
 # support logging rollout prob for debugging purpose
 # "Truncated importance sampling" requires rollout log probs, set to True when turning on Truncated importance sampling
 calculate_log_probs: False

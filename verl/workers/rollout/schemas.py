@@ -114,6 +114,9 @@ class AsyncRolloutRequest(BaseModel):
     output_token_ids: torch.Tensor | None = None
     rollout_log_probs: torch.Tensor | None = None
     assistant_token_spans: list[tuple[int, int]] = Field(default_factory=list)
+    current_assistant_turns: int = 0
+    current_user_turns: int = 0
+    user_turn_rewards: list[float] = Field(default_factory=list)
 
     use_inference_chat_template: bool
     tokenization_sanity_check_mode: TokenizationSanityCheckModeEnum

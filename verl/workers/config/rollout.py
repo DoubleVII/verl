@@ -57,6 +57,7 @@ class MultiTurnConfig(BaseConfig):
     response_mask_mode: str = "all_assistant"
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None
+    shared_first_turn_by_uid: bool = False
 
 
 @dataclass

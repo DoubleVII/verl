@@ -902,14 +902,34 @@ class SGLangRollout(BaseRollout):
     ) -> AsyncRolloutRequest:
         assert self._tp_rank == 0, "only the master process can call this function"
         _req = deepcopy(req)
-        finish_reason_type = None
-        output = None
+        return await self._run_rollout_request(
+            _req,
+            do_sample=do_sample,
+            is_validate=is_validate,
+            pause_after_interaction=False,
+            finalize=True,
+            **kwargs,
+        )
 
-        current_turns = 0
-        user_turns = 0
-        user_turn_rewards = []
+    async def _async_rollout_a_request_until_after_interaction(
+        self,
+        req: AsyncRolloutRequest,
+        do_sample: bool = True,
+        is_validate: bool = False,
+        **kwargs,
+    ) -> AsyncRolloutRequest:
+        assert self._tp_rank == 0, "only the master process can call this function"
+        _req = deepcopy(req)
+        return await self._run_rollout_request(
+            _req,
+            do_sample=do_sample,
+            is_validate=is_validate,
+            pause_after_interaction=True,
+            finalize=False,
+            **kwargs,
+        )
 
-        # Create request-level sampling parameters
+    def _get_request_sampling_params(self, do_sample: bool, is_validate: bool, **kwargs) -> dict:
         request_sampling_params = self.sampling_params.copy()
         if not do_sample:
             request_sampling_params.update(
@@ -938,10 +958,24 @@ class SGLangRollout(BaseRollout):
                 }
             )
 
-        # Update with any additional kwargs
         request_sampling_params.update(kwargs)
+        return request_sampling_params
 
-        while current_turns < self.config.multi_turn.max_assistant_turns:
+    async def _run_rollout_request(
+        self,
+        _req: AsyncRolloutRequest,
+        do_sample: bool = True,
+        is_validate: bool = False,
+        pause_after_interaction: bool = False,
+        finalize: bool = True,
+        **kwargs,
+    ) -> AsyncRolloutRequest:
+        finish_reason_type = None
+        output = None
+
+        request_sampling_params = self._get_request_sampling_params(do_sample, is_validate, **kwargs)
+
+        while _req.current_assistant_turns < self.config.multi_turn.max_assistant_turns:
             if _req.state == AsyncRolloutRequestStateEnum.PENDING:
                 await self._handle_pending_state(_req)
                 _req.state = AsyncRolloutRequestStateEnum.RUNNING
@@ -1007,7 +1041,7 @@ class SGLangRollout(BaseRollout):
                     content = output["text"]
 
                 finish_reason_type = FinishReasonTypeEnum.from_str(output["meta_info"]["finish_reason"]["type"])
-                current_turns += 1
+                _req.current_assistant_turns += 1
                 if finish_reason_type == FinishReasonTypeEnum.LENGTH:
                     _req.add_assistant_message(self.processing_class, content=content, content_ids=content_ids)
                     break
@@ -1061,8 +1095,8 @@ class SGLangRollout(BaseRollout):
                         if (
                             _req.interaction_kwargs
                             and self.interaction_map
-                            and user_turns < self.config.multi_turn.max_user_turns
-                            and current_turns < self.config.multi_turn.max_assistant_turns
+                            and _req.current_user_turns < self.config.multi_turn.max_user_turns
+                            and _req.current_assistant_turns < self.config.multi_turn.max_assistant_turns
                         ):
                             _req.state = AsyncRolloutRequestStateEnum.INTERACTING
                         else:
@@ -1071,7 +1105,7 @@ class SGLangRollout(BaseRollout):
                             _req.state = AsyncRolloutRequestStateEnum.COMPLETED
                             break
             elif _req.state == AsyncRolloutRequestStateEnum.INTERACTING:
-                user_turns += 1
+                _req.current_user_turns += 1
                 messages = [{"role": x.role, "content": x.content} for x in _req.messages]
 
                 # Get interaction by name from interaction_kwargs
@@ -1089,12 +1123,12 @@ class SGLangRollout(BaseRollout):
                 should_terminate_sequence, content, reward, metrics = await interaction.generate_response(
                     _req.request_id, messages, **_req.interaction_kwargs
                 )
-                user_turn_rewards.append(reward)
+                _req.user_turn_rewards.append(reward)
                 # Add turn check
                 if (
                     should_terminate_sequence
-                    or user_turns > self.config.multi_turn.max_user_turns
-                    or current_turns > self.config.multi_turn.max_assistant_turns
+                    or _req.current_user_turns > self.config.multi_turn.max_user_turns
+                    or _req.current_assistant_turns > self.config.multi_turn.max_assistant_turns
                 ):
                     finish_reason_type = FinishReasonTypeEnum.STOP
                     _req.state = AsyncRolloutRequestStateEnum.COMPLETED
@@ -1106,8 +1140,13 @@ class SGLangRollout(BaseRollout):
                         break
                     else:
                         _req.state = AsyncRolloutRequestStateEnum.RUNNING
+                        if pause_after_interaction:
+                            return _req
 
-        if current_turns >= self.config.multi_turn.max_assistant_turns:
+        if not finalize:
+            return _req
+
+        if _req.current_assistant_turns >= self.config.multi_turn.max_assistant_turns:
             finish_reason_type = FinishReasonTypeEnum.STOP
 
         # Calculate the reward for each tool
@@ -1122,7 +1161,7 @@ class SGLangRollout(BaseRollout):
             tool_reward_tasks.append(calc_reward_and_release_fn(name, tool))
         tool_reward_scores = await asyncio.gather(*tool_reward_tasks)
         tool_reward_scores = dict(tool_reward_scores)
-        all_rewards = {**tool_reward_scores, **{"user_turn_rewards": user_turn_rewards}}
+        all_rewards = {**tool_reward_scores, **{"user_turn_rewards": _req.user_turn_rewards}}
         _req.finalize(
             self.processing_class,
             all_rewards,
@@ -1192,6 +1231,59 @@ class SGLangRollout(BaseRollout):
             interaction = self.interaction_map[interaction_name]
             await interaction.start_interaction(_req.request_id, **interaction_kwargs)
 
+    def _shared_first_turn_enabled(self, prompts: DataProto, req_list: list[AsyncRolloutRequest], is_validate: bool) -> bool:
+        if not self.config.multi_turn.shared_first_turn_by_uid:
+            return False
+        if is_validate:
+            return False
+        if "uid" not in prompts.non_tensor_batch:
+            raise ValueError("multi_turn.shared_first_turn_by_uid requires uid in prompts.non_tensor_batch")
+        if any(req.tool_schemas is not None or req.tools_kwargs for req in req_list):
+            raise ValueError("multi_turn.shared_first_turn_by_uid only supports interaction rollouts without tools")
+        unsupported = [
+            req.interaction_kwargs.get("name")
+            for req in req_list
+            if req.interaction_kwargs.get("name") != "gqm_post_edit"
+        ]
+        if unsupported:
+            raise ValueError(
+                "multi_turn.shared_first_turn_by_uid only supports interaction name 'gqm_post_edit', "
+                f"got {unsupported[0]!r}"
+            )
+        return True
+
+    async def _async_rollout_shared_first_turn_by_uid(
+        self,
+        prompts: DataProto,
+        req_list: list[AsyncRolloutRequest],
+        do_sample: bool,
+        is_validate: bool,
+        **kwargs,
+    ) -> list[AsyncRolloutRequest]:
+        uids = list(prompts.non_tensor_batch["uid"])
+        uid_to_indices: dict[str, list[int]] = {}
+        for idx, uid in enumerate(uids):
+            uid_to_indices.setdefault(str(uid), []).append(idx)
+
+        prefix_tasks = [
+            self._async_rollout_a_request_until_after_interaction(req_list[group_indices[0]], do_sample, is_validate, **kwargs)
+            for group_indices in uid_to_indices.values()
+        ]
+        prefix_reqs = await asyncio.gather(*prefix_tasks)
+
+        forked_reqs: list[AsyncRolloutRequest] = []
+        for prefix_req, group_indices in zip(prefix_reqs, uid_to_indices.values(), strict=True):
+            for rollout_offset, data_idx in enumerate(group_indices):
+                forked_req = deepcopy(prefix_req)
+                forked_req.batch_data_id = req_list[data_idx].batch_data_id
+                forked_req.rollout_offset = rollout_offset
+                forked_req.request_id = req_list[data_idx].request_id
+                forked_reqs.append(forked_req)
+
+        return await asyncio.gather(
+            *[self._run_rollout_request(req, do_sample, is_validate, finalize=True, **kwargs) for req in forked_reqs]
+        )
+
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
     @torch.no_grad()
     def _req_level_generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
@@ -1219,6 +1311,11 @@ class SGLangRollout(BaseRollout):
                     asyncio.gather(
                         *[self._async_rollout_a_request(req, do_sample, is_validate, **kwargs) for req in req_list],
                     )
+                )
+            elif self._shared_first_turn_enabled(prompts, req_list, is_validate):
+                loop = asyncio.get_event_loop()
+                output_req_list = loop.run_until_complete(
+                    self._async_rollout_shared_first_turn_by_uid(prompts, req_list, do_sample, is_validate, **kwargs)
                 )
             else:
                 # add progress monitoring and abort function
