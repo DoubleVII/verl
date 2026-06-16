@@ -284,6 +284,7 @@ def compute_group_translation_scores(
     if indices is None:
         indices = list(range(len(responses)))
     if not indices:
+        # Keep distributed RM generation collectives aligned across ranks even for empty local work; see fix de799290.
         generate_fn([])
         return {}
 
@@ -391,6 +392,7 @@ def compute_group_translation_scores(
     scores_dict: Dict[int, float] = {}
     reward_failed_count = 0
 
+    # Keep distributed RM generation collectives aligned across ranks even when this task has no local prompts; see fix de799290.
     outputs = generate_fn(prompt_list)
     if prompt_list:
         for j, output in enumerate(outputs):
@@ -586,6 +588,7 @@ def compute_group_post_edit_scores(
         indices=indices,
         response_texts=response_texts,
     )
+    # Keep distributed RM generation collectives aligned across ranks even when this task has no local prompts; see fix de799290.
     outputs = generate_fn(prompt_list)
     if not prompt_list:
         return {}
