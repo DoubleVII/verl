@@ -112,6 +112,33 @@ def _make_prompt_batch():
     )
 
 
+def _make_mixed_prompt_batch():
+    prompts = _make_prompt_batch()
+    prompts.non_tensor_batch["interaction_kwargs"] = np.concatenate(
+        [
+            prompts.non_tensor_batch["interaction_kwargs"],
+            np.array([{}, {}, {}], dtype=object),
+        ]
+    )
+    prompts.non_tensor_batch["raw_prompt"] = np.concatenate(
+        [
+            prompts.non_tensor_batch["raw_prompt"],
+            np.array([[{"role": "user", "content": "ranking"}] for _ in range(3)], dtype=object),
+        ]
+    )
+    prompts.non_tensor_batch["uid"] = np.concatenate(
+        [prompts.non_tensor_batch["uid"], np.array(["r0", "r0", "r0"], dtype=object)]
+    )
+    prompts.batch = TensorDict(
+        {
+            key: torch.cat([value, value[:3]], dim=0)
+            for key, value in prompts.batch.items()
+        },
+        batch_size=9,
+    )
+    return prompts
+
+
 def test_shared_first_turn_fans_out_second_turn_by_uid():
     rollout = _make_rollout()
     prompts = _make_prompt_batch()
@@ -151,14 +178,30 @@ def test_shared_first_turn_requires_uid():
         rollout._shared_first_turn_enabled(prompts, req_list, is_validate=False)
 
 
-def test_shared_first_turn_rejects_non_gqm_interaction():
+def test_shared_first_turn_handles_mixed_gqm_post_edit_and_single_turn_tasks():
     rollout = _make_rollout()
-    prompts = _make_prompt_batch()
-    prompts.non_tensor_batch["interaction_kwargs"][0] = {"name": "gsm8k"}
+    prompts = _make_mixed_prompt_batch()
     req_list = rollout._preprocess_prompt_to_async_rollout_requests(prompts)
+    calls = []
 
-    with pytest.raises(ValueError, match="gqm_post_edit"):
-        rollout._shared_first_turn_enabled(prompts, req_list, is_validate=False)
+    async def fake_engine(req, sampling_params, image_data=None):
+        calls.append((req.batch_data_id, len([msg for msg in req.messages if msg.role == "assistant"])))
+        assistant_count = calls[-1][1]
+        text = f"first-{req.batch_data_id}" if assistant_count == 0 else f"second-{req.batch_data_id}"
+        return {"text": text, "meta_info": {"finish_reason": {"type": "stop"}}}
+
+    rollout._handle_engine_call = fake_engine
+
+    assert rollout._shared_first_turn_enabled(prompts, req_list, is_validate=False) is True
+    output = asyncio.run(rollout._async_rollout_shared_first_turn_by_uid(prompts, req_list, True, False))
+    output = sorted(output, key=lambda req: (req.batch_data_id, req.rollout_offset))
+
+    assert len(output) == 9
+    assert sum(1 for _, assistant_count in calls if assistant_count == 0) == 5
+    assert sum(1 for _, assistant_count in calls if assistant_count == 1) == 6
+    assert [req.batch_data_id for req in output] == list(range(9))
+    assert [len([msg for msg in req.messages if msg.role == "assistant"]) for req in output[:6]] == [2] * 6
+    assert [len([msg for msg in req.messages if msg.role == "assistant"]) for req in output[6:]] == [1] * 3
 
 
 def test_shared_first_turn_disabled_falls_back():

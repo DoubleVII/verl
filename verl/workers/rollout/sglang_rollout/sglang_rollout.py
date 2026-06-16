@@ -1238,19 +1238,7 @@ class SGLangRollout(BaseRollout):
             return False
         if "uid" not in prompts.non_tensor_batch:
             raise ValueError("multi_turn.shared_first_turn_by_uid requires uid in prompts.non_tensor_batch")
-        if any(req.tool_schemas is not None or req.tools_kwargs for req in req_list):
-            raise ValueError("multi_turn.shared_first_turn_by_uid only supports interaction rollouts without tools")
-        unsupported = [
-            req.interaction_kwargs.get("name")
-            for req in req_list
-            if req.interaction_kwargs.get("name") != "gqm_post_edit"
-        ]
-        if unsupported:
-            raise ValueError(
-                "multi_turn.shared_first_turn_by_uid only supports interaction name 'gqm_post_edit', "
-                f"got {unsupported[0]!r}"
-            )
-        return True
+        return any(req.interaction_kwargs.get("name") == "gqm_post_edit" for req in req_list)
 
     async def _async_rollout_shared_first_turn_by_uid(
         self,
@@ -1260,9 +1248,18 @@ class SGLangRollout(BaseRollout):
         is_validate: bool,
         **kwargs,
     ) -> list[AsyncRolloutRequest]:
+        gqm_post_edit_indices = [
+            idx for idx, req in enumerate(req_list) if req.interaction_kwargs.get("name") == "gqm_post_edit"
+        ]
+        passthrough_indices = [idx for idx in range(len(req_list)) if idx not in set(gqm_post_edit_indices)]
+
+        if any(req_list[idx].tool_schemas is not None or req_list[idx].tools_kwargs for idx in gqm_post_edit_indices):
+            raise ValueError("multi_turn.shared_first_turn_by_uid only supports gqm_post_edit rollouts without tools")
+
         uids = list(prompts.non_tensor_batch["uid"])
         uid_to_indices: dict[str, list[int]] = {}
-        for idx, uid in enumerate(uids):
+        for idx in gqm_post_edit_indices:
+            uid = uids[idx]
             uid_to_indices.setdefault(str(uid), []).append(idx)
 
         prefix_tasks = [
@@ -1281,7 +1278,8 @@ class SGLangRollout(BaseRollout):
                 forked_reqs.append(forked_req)
 
         return await asyncio.gather(
-            *[self._run_rollout_request(req, do_sample, is_validate, finalize=True, **kwargs) for req in forked_reqs]
+            *[self._run_rollout_request(req, do_sample, is_validate, finalize=True, **kwargs) for req in forked_reqs],
+            *[self._async_rollout_a_request(req_list[idx], do_sample, is_validate, **kwargs) for idx in passthrough_indices],
         )
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
