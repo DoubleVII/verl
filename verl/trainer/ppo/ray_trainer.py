@@ -512,6 +512,12 @@ class RayPPOTrainer:
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid", "ability"}) & batch.non_tensor_batch.keys()
+        uid_for_generation = None
+
+        if self.config.actor_rollout_ref.rollout.multi_turn.shared_first_turn_by_uid:
+            if "uid" not in batch.non_tensor_batch:
+                raise ValueError("rollout.multi_turn.shared_first_turn_by_uid requires uid in training batch")
+            uid_for_generation = batch.non_tensor_batch["uid"].copy()
 
         # pop those keys for generation
         batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -520,6 +526,8 @@ class RayPPOTrainer:
             batch_keys=batch_keys_to_pop,
             non_tensor_batch_keys=list(non_tensor_batch_keys_to_pop),
         )
+        if uid_for_generation is not None:
+            gen_batch.non_tensor_batch["uid"] = uid_for_generation
 
         # For agent loop, we need reward model keys to compute score.
         if self.async_rollout_mode:
