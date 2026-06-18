@@ -328,6 +328,9 @@ class RayPPOTrainer:
         self.distillation_teacher_source = (
             self.config.distillation.teacher.source if self.use_distillation else None
         )
+        if self.use_distillation:
+            with open_dict(self.config.actor_rollout_ref):
+                self.config.actor_rollout_ref.distillation = self.config.distillation
         self.use_rm = need_reward_model(self.role_worker_mapping)
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
