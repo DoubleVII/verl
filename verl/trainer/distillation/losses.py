@@ -15,6 +15,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 
@@ -30,16 +31,19 @@ def validate_distillation_config(config) -> None:
 
     teacher_source = distillation_config.teacher.source
     loss_mode = distillation_config.distillation_loss.loss_mode
+    actor_strategy = config.actor_rollout_ref.actor.strategy
     if teacher_source == "reward_model":
         raise NotImplementedError(
             "distillation.teacher.source=reward_model is reserved for future GenRM-as-teacher support "
             "and is not implemented yet."
         )
     if loss_mode == "forward_kl_topk":
-        raise NotImplementedError(
-            "distillation.distillation_loss.loss_mode=forward_kl_topk is not supported in this first OPD "
-            "implementation. Use sampled-token KL modes such as k3, low_var_kl, k1, kl, abs, mse, or k2."
-        )
+        if actor_strategy not in {"fsdp", "fsdp2"}:
+            raise NotImplementedError("distillation loss_mode=forward_kl_topk is implemented for FSDP only.")
+        if config.actor_rollout_ref.actor.get("ulysses_sequence_parallel_size", 1) > 1:
+            raise NotImplementedError(
+                "distillation loss_mode=forward_kl_topk does not yet support actor Ulysses sequence parallelism."
+            )
     if teacher_source == "ref_policy" and (
         config.actor_rollout_ref.actor.use_kl_loss or config.algorithm.use_kl_in_reward
     ):
@@ -127,6 +131,110 @@ def compute_sampled_distillation_loss(
         )
 
     metrics["distillation/loss"] = distillation_loss.detach().item()
+    return distillation_loss, metrics
+
+
+def is_forward_kl_topk_enabled(distillation_config) -> bool:
+    return is_distillation_enabled(distillation_config) and distillation_config.distillation_loss.loss_mode == "forward_kl_topk"
+
+
+def compute_topk_logprobs_from_logits(
+    logits: torch.Tensor,
+    topk: int,
+    use_chunked_topk: bool = False,
+    chunk_size: int = 4096,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return top-k log probabilities and ids for logits shaped [..., vocab]."""
+    topk_logits, topk_ids = torch.topk(logits, k=topk, dim=-1)
+    if use_chunked_topk:
+        flat_logits = logits.reshape(-1, logits.shape[-1])
+        flat_topk_logits = topk_logits.reshape(-1, topk)
+        flat_topk_logprobs = torch.empty_like(flat_topk_logits)
+        for start in range(0, flat_logits.shape[0], chunk_size):
+            end = min(start + chunk_size, flat_logits.shape[0])
+            log_z = torch.logsumexp(flat_logits[start:end].float(), dim=-1, keepdim=True)
+            flat_topk_logprobs[start:end] = (flat_topk_logits[start:end].float() - log_z).to(logits.dtype)
+        topk_logprobs = flat_topk_logprobs.reshape(topk_logits.shape)
+    else:
+        topk_logprobs = F.log_softmax(logits, dim=-1).gather(dim=-1, index=topk_ids)
+    return topk_logprobs, topk_ids
+
+
+def gather_logprobs_at_ids(
+    logits: torch.Tensor,
+    ids: torch.Tensor,
+    use_chunked_topk: bool = False,
+    chunk_size: int = 4096,
+) -> torch.Tensor:
+    """Compute log_softmax(logits).gather(ids) without requiring caller to materialize logprobs."""
+    if use_chunked_topk:
+        vocab_size = logits.shape[-1]
+        topk = ids.shape[-1]
+        flat_logits = logits.reshape(-1, vocab_size)
+        flat_ids = ids.reshape(-1, topk)
+        flat_out = torch.empty(flat_ids.shape, dtype=logits.dtype, device=logits.device)
+        for start in range(0, flat_logits.shape[0], chunk_size):
+            end = min(start + chunk_size, flat_logits.shape[0])
+            chunk_logits = flat_logits[start:end].float()
+            log_z = torch.logsumexp(chunk_logits, dim=-1, keepdim=True)
+            gathered = torch.gather(chunk_logits, dim=-1, index=flat_ids[start:end])
+            flat_out[start:end] = (gathered - log_z).to(logits.dtype)
+        return flat_out.reshape(ids.shape)
+    return F.log_softmax(logits, dim=-1).gather(dim=-1, index=ids)
+
+
+def compute_forward_kl_topk_distillation_loss(
+    config,
+    distillation_config,
+    student_logits: torch.Tensor,
+    teacher_logprobs: torch.Tensor,
+    teacher_ids: torch.Tensor,
+    response_mask: torch.Tensor,
+):
+    """Compute FSDP top-k forward KL OPD loss for padded response tensors."""
+    loss_config = distillation_config.distillation_loss
+    response_mask = response_mask.to(bool)
+    teacher_logprobs = teacher_logprobs.to(student_logits.device)
+    teacher_ids = teacher_ids.to(student_logits.device)
+
+    student_topk_logprobs = gather_logprobs_at_ids(
+        logits=student_logits,
+        ids=teacher_ids,
+        use_chunked_topk=loss_config.use_chunked_topk,
+        chunk_size=loss_config.chunked_topk_chunk_size,
+    )
+    teacher_for_loss = teacher_logprobs
+    student_for_loss = student_topk_logprobs
+    if loss_config.log_prob_min_clamp is not None:
+        teacher_for_loss = teacher_for_loss.clamp_min(loss_config.log_prob_min_clamp)
+        student_for_loss = student_for_loss.clamp_min(loss_config.log_prob_min_clamp)
+
+    teacher_probs = teacher_for_loss.float().exp()
+    distillation_losses = (teacher_probs * (teacher_for_loss.float() - student_for_loss.float())).sum(dim=-1)
+    distillation_losses = distillation_losses.clamp_min(0.0)
+    valid_losses = distillation_losses[response_mask]
+
+    if loss_config.loss_max_clamp is not None:
+        distillation_losses = distillation_losses.clamp(max=loss_config.loss_max_clamp)
+
+    distillation_loss = agg_loss(
+        loss_mat=distillation_losses,
+        loss_mask=response_mask,
+        loss_agg_mode=config.loss_agg_mode,
+    )
+
+    student_mass = student_topk_logprobs.float().exp().sum(dim=-1)
+    teacher_mass = teacher_logprobs.float().exp().sum(dim=-1)
+    valid_student_mass = student_mass[response_mask]
+    valid_teacher_mass = teacher_mass[response_mask]
+
+    metrics = {
+        "distillation/loss": distillation_loss.detach().item(),
+        "distillation/loss_min": valid_losses.min().detach().item(),
+        "distillation/loss_max": valid_losses.max().detach().item(),
+        "distillation/student_mass": valid_student_mass.mean().detach().item(),
+        "distillation/teacher_mass": valid_teacher_mass.mean().detach().item(),
+    }
     return distillation_loss, metrics
 
 

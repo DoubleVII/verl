@@ -29,7 +29,10 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.distillation.losses import (
     combine_policy_and_distillation_loss,
+    compute_forward_kl_topk_distillation_loss,
     compute_sampled_distillation_loss,
+    compute_topk_logprobs_from_logits,
+    is_forward_kl_topk_enabled,
     is_distillation_enabled,
 )
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty, compute_policy_sft_loss
@@ -89,10 +92,11 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
         self.distillation_config = self.config.get("distillation", None)
         self.distillation_enabled = is_distillation_enabled(self.distillation_config)
+        self.distillation_forward_kl_topk_enabled = is_forward_kl_topk_enabled(self.distillation_config)
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self, micro_batch, temperature, calculate_entropy=False, compute_topk=False, compute_distillation_topk=False
+    ) -> tuple[torch.Tensor, torch.Tensor, dict]:
         """
         Returns:
             entropy: # (bs, response_len)
@@ -111,6 +115,7 @@ class DataParallelPPOActor(BasePPOActor):
             attention_mask = micro_batch["attention_mask"]
             position_ids = micro_batch["position_ids"]
             entropy = None
+            aux_outputs = {}
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
 
@@ -184,6 +189,8 @@ class DataParallelPPOActor(BasePPOActor):
                 )  # prevent model thinks we are generating
 
                 if self.use_fused_kernels:
+                    if compute_topk or compute_distillation_topk:
+                        raise NotImplementedError("forward_kl_topk does not support fused kernels in FSDP actor yet.")
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                     entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
 
@@ -200,6 +207,64 @@ class DataParallelPPOActor(BasePPOActor):
                         labels=input_ids_rmpad_rolled,
                         inplace_backward=inplace_backward,
                     )
+
+                    if compute_topk or compute_distillation_topk:
+                        response_mask_full = torch.zeros(
+                            (batch_size, seqlen), dtype=torch.bool, device=attention_mask.device
+                        )
+                        response_mask_full[:, -response_length - 1 : -1] = True
+                        response_mask_full = response_mask_full & attention_mask.bool()
+                        response_indices_mask = response_mask_full.reshape(-1)[indices]
+                        response_position_mask = response_mask_full[:, -response_length - 1 : -1].reshape(-1)
+                        if self.use_ulysses_sp:
+                            raise NotImplementedError(
+                                "forward_kl_topk does not support FSDP Ulysses sequence parallelism yet."
+                            )
+                        response_logits = logits_rmpad[response_indices_mask]
+
+                        if compute_topk:
+                            topk = self.distillation_config.distillation_loss.topk
+                            teacher_logprobs_flat, teacher_ids_flat = compute_topk_logprobs_from_logits(
+                                logits=response_logits,
+                                topk=topk,
+                                use_chunked_topk=self.distillation_config.distillation_loss.use_chunked_topk,
+                                chunk_size=self.distillation_config.distillation_loss.chunked_topk_chunk_size,
+                            )
+                            teacher_logprobs_full = torch.zeros(
+                                (batch_size * response_length, topk),
+                                dtype=teacher_logprobs_flat.dtype,
+                                device=teacher_logprobs_flat.device,
+                            )
+                            teacher_ids_full = torch.zeros(
+                                (batch_size * response_length, topk),
+                                dtype=teacher_ids_flat.dtype,
+                                device=teacher_ids_flat.device,
+                            )
+                            teacher_logprobs_full[response_position_mask] = teacher_logprobs_flat
+                            teacher_ids_full[response_position_mask] = teacher_ids_flat
+                            aux_outputs["teacher_logprobs"] = teacher_logprobs_full.reshape(
+                                batch_size, response_length, topk
+                            )
+                            aux_outputs["teacher_ids"] = teacher_ids_full.reshape(batch_size, response_length, topk)
+
+                        if compute_distillation_topk:
+                            student_logits_full = torch.zeros(
+                                (batch_size * response_length, response_logits.shape[-1]),
+                                dtype=response_logits.dtype,
+                                device=response_logits.device,
+                            )
+                            student_logits_full[response_position_mask] = response_logits
+                            student_logits = student_logits_full.reshape(batch_size, response_length, response_logits.shape[-1])
+                            distillation_loss, distillation_metrics = compute_forward_kl_topk_distillation_loss(
+                                config=self.config,
+                                distillation_config=self.distillation_config,
+                                student_logits=student_logits,
+                                teacher_logprobs=micro_batch["teacher_logprobs"],
+                                teacher_ids=micro_batch["teacher_ids"],
+                                response_mask=micro_batch["response_mask"],
+                            )
+                            aux_outputs["distillation_loss"] = distillation_loss
+                            aux_outputs["distillation_metrics"] = distillation_metrics
 
                     # compute entropy
                     if calculate_entropy:
@@ -262,6 +327,8 @@ class DataParallelPPOActor(BasePPOActor):
                 )  # prevent model thinks we are generating
 
                 if self.use_fused_kernels:
+                    if compute_topk or compute_distillation_topk:
+                        raise NotImplementedError("forward_kl_topk does not support fused kernels in FSDP actor yet.")
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
                     entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
 
@@ -271,13 +338,34 @@ class DataParallelPPOActor(BasePPOActor):
                     logits.div_(temperature)
                     logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
+                    if compute_topk:
+                        topk = self.distillation_config.distillation_loss.topk
+                        teacher_logprobs, teacher_ids = compute_topk_logprobs_from_logits(
+                            logits=logits,
+                            topk=topk,
+                            use_chunked_topk=self.distillation_config.distillation_loss.use_chunked_topk,
+                            chunk_size=self.distillation_config.distillation_loss.chunked_topk_chunk_size,
+                        )
+                        aux_outputs["teacher_logprobs"] = teacher_logprobs
+                        aux_outputs["teacher_ids"] = teacher_ids
+                    if compute_distillation_topk:
+                        distillation_loss, distillation_metrics = compute_forward_kl_topk_distillation_loss(
+                            config=self.config,
+                            distillation_config=self.distillation_config,
+                            student_logits=logits,
+                            teacher_logprobs=micro_batch["teacher_logprobs"],
+                            teacher_ids=micro_batch["teacher_ids"],
+                            response_mask=micro_batch["response_mask"],
+                        )
+                        aux_outputs["distillation_loss"] = distillation_loss
+                        aux_outputs["distillation_metrics"] = distillation_metrics
                     if calculate_entropy:
                         if not self.config.entropy_checkpointing:
                             entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
                         else:
                             entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
 
-            return entropy, log_probs
+            return entropy, log_probs, aux_outputs
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -301,7 +389,7 @@ class DataParallelPPOActor(BasePPOActor):
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
-    def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
+    def compute_log_prob(self, data: DataProto, calculate_entropy=False, compute_topk=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
@@ -339,27 +427,45 @@ class DataParallelPPOActor(BasePPOActor):
 
         log_probs_lst = []
         entropy_lst = []
+        teacher_logprobs_lst = []
+        teacher_ids_lst = []
         for micro_batch in micro_batches:
             micro_batch = micro_batch.to(get_device_id())
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(
-                    model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                entropy, log_probs, aux_outputs = self._forward_micro_batch(
+                    model_inputs,
+                    temperature=temperature,
+                    calculate_entropy=calculate_entropy,
+                    compute_topk=compute_topk,
                 )
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
+            if compute_topk:
+                teacher_logprobs_lst.append(aux_outputs["teacher_logprobs"])
+                teacher_ids_lst.append(aux_outputs["teacher_ids"])
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
         if calculate_entropy:
             entropys = torch.concat(entropy_lst, dim=0)
+        teacher_logprobs = None
+        teacher_ids = None
+        if compute_topk:
+            teacher_logprobs = torch.concat(teacher_logprobs_lst, dim=0)
+            teacher_ids = torch.concat(teacher_ids_lst, dim=0)
 
         if use_dynamic_bsz:
             log_probs = restore_dynamic_batch(log_probs, batch_idx_list)
             if calculate_entropy:
                 entropys = restore_dynamic_batch(entropys, batch_idx_list)
+            if compute_topk:
+                teacher_logprobs = restore_dynamic_batch(teacher_logprobs, batch_idx_list)
+                teacher_ids = restore_dynamic_batch(teacher_ids, batch_idx_list)
 
+        if compute_topk:
+            return log_probs, entropys, teacher_logprobs, teacher_ids
         return log_probs, entropys
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
@@ -382,6 +488,8 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("ref_log_prob")
         if self.distillation_enabled:
             select_keys.append("teacher_logprobs")
+        if self.distillation_forward_kl_topk_enabled:
+            select_keys.append("teacher_ids")
         # Include pre-computed IS weights if present in batch
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
@@ -433,8 +541,11 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(
-                        model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
+                    entropy, log_prob, aux_outputs = self._forward_micro_batch(
+                        model_inputs,
+                        temperature=temperature,
+                        calculate_entropy=calculate_entropy,
+                        compute_distillation_topk=self.distillation_forward_kl_topk_enabled,
                     )
 
                     # for fully_async_policy recipe
@@ -505,7 +616,17 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
-                    if self.distillation_enabled:
+                    if self.distillation_forward_kl_topk_enabled:
+                        distillation_loss = aux_outputs["distillation_loss"]
+                        distillation_metrics = aux_outputs["distillation_metrics"]
+                        policy_loss = combine_policy_and_distillation_loss(
+                            policy_loss=policy_loss,
+                            distillation_loss=distillation_loss,
+                            distillation_config=self.distillation_config,
+                        )
+                        for name, value in distillation_metrics.items():
+                            micro_batch_metrics[f"actor/{name}"] = value * loss_scale_factor
+                    elif self.distillation_enabled:
                         distillation_loss, distillation_metrics = compute_sampled_distillation_loss(
                             config=self.config,
                             distillation_config=self.distillation_config,

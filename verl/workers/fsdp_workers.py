@@ -86,6 +86,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.ray_utils import get_event_loop
+from verl.trainer.distillation.losses import is_forward_kl_topk_enabled
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig, FSDPActorConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
@@ -838,6 +839,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             with open_dict(self.config.ref):
                 self.config.ref.use_remove_padding = use_remove_padding
                 self.config.ref.use_fused_kernels = use_fused_kernels
+                if self.config.get("distillation", None) is not None:
+                    self.config.ref.distillation = omega_conf_to_dataclass(self.config.distillation)
             self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
         if self._is_actor:
@@ -978,11 +981,26 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             with adapter_ctx:
-                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-            output = DataProto.from_dict(
-                tensors={"old_log_probs": output, "entropys": entropys},
-                meta_info={"temperature": self.config.rollout.temperature},
-            )
+                distillation_config = self.config.get("distillation", None)
+                compute_topk = (
+                    is_forward_kl_topk_enabled(distillation_config)
+                    and distillation_config.teacher.source == "current_policy"
+                )
+                actor_outputs = self.actor.compute_log_prob(
+                    data=data, calculate_entropy=True, compute_topk=compute_topk
+                )
+            if compute_topk:
+                output, entropys, teacher_logprobs, teacher_ids = actor_outputs
+                tensors = {
+                    "old_log_probs": output,
+                    "entropys": entropys,
+                    "teacher_logprobs": teacher_logprobs,
+                    "teacher_ids": teacher_ids,
+                }
+            else:
+                output, entropys = actor_outputs
+                tensors = {"old_log_probs": output, "entropys": entropys}
+            output = DataProto.from_dict(tensors=tensors, meta_info={"temperature": self.config.rollout.temperature})
 
         output = output.to("cpu")
 
@@ -1018,8 +1036,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         with self.ulysses_sharding_manager:
             data = data.to("cpu")  # data will to device with each micro batch on ref.compute_log_prob
-            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
-            output = DataProto.from_dict(tensors={"ref_log_prob": output})
+            distillation_config = self.config.get("distillation", None)
+            compute_topk = (
+                is_forward_kl_topk_enabled(distillation_config)
+                and distillation_config.teacher.source == "ref_policy"
+            )
+            ref_outputs = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False, compute_topk=compute_topk)
+            if compute_topk:
+                output, _, teacher_logprobs, teacher_ids = ref_outputs
+                tensors = {"ref_log_prob": output, "teacher_logprobs": teacher_logprobs, "teacher_ids": teacher_ids}
+            else:
+                output, _ = ref_outputs
+                tensors = {"ref_log_prob": output}
+            output = DataProto.from_dict(tensors=tensors)
 
         output = output.to("cpu")
 

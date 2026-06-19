@@ -9,7 +9,12 @@ from hydra.core.global_hydra import GlobalHydra
 
 from verl.trainer.ppo.ray_trainer import Role
 from verl.trainer.main_ppo import TaskRunner
-from verl.trainer.distillation.losses import compute_sampled_distillation_loss, validate_distillation_config
+from verl.trainer.distillation.losses import (
+    compute_forward_kl_topk_distillation_loss,
+    compute_sampled_distillation_loss,
+    compute_topk_logprobs_from_logits,
+    validate_distillation_config,
+)
 from verl.utils.config import omega_conf_to_dataclass
 
 
@@ -53,7 +58,7 @@ def test_ref_policy_teacher_rejects_reference_kl_reward():
         validate_distillation_config(cfg)
 
 
-def test_reserved_teacher_and_topk_loss_error_clearly():
+def test_reserved_teacher_error_clearly():
     cfg = _compose_ppo(["distillation.enabled=True", "distillation.teacher.source=reward_model"])
     with pytest.raises(NotImplementedError, match="not implemented yet"):
         validate_distillation_config(cfg)
@@ -73,10 +78,6 @@ def test_distillation_teacher_worker_mapping():
     runner.add_ref_policy_worker(ref_policy_cfg, DummyWorker)
     assert Role.RefPolicy in runner.role_worker_mapping
     assert runner.mapping[Role.RefPolicy] == "global_pool"
-
-    cfg = _compose_ppo(["distillation.enabled=True", "distillation.distillation_loss.loss_mode=forward_kl_topk"])
-    with pytest.raises(NotImplementedError, match="not supported"):
-        validate_distillation_config(cfg)
 
 
 def test_sampled_k3_loss_is_finite_and_zero_for_identical_logprobs():
@@ -111,3 +112,75 @@ def test_direct_backprop_k1_is_rejected():
     )
     with pytest.raises(InstantiationException, match="Directly backpropagating"):
         omega_conf_to_dataclass(cfg.distillation)
+
+
+def test_forward_kl_topk_config_loads_for_fsdp():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=current_policy",
+            "distillation.distillation_loss.loss_mode=forward_kl_topk",
+            "distillation.distillation_loss.topk=4",
+        ]
+    )
+    validate_distillation_config(cfg)
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+    assert distillation_cfg.distillation_loss.loss_mode == "forward_kl_topk"
+
+
+def test_forward_kl_topk_rejects_missing_topk():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.distillation_loss.loss_mode=forward_kl_topk",
+            "distillation.distillation_loss.topk=null",
+        ]
+    )
+    with pytest.raises(InstantiationException, match="topk must be set"):
+        omega_conf_to_dataclass(cfg.distillation)
+
+
+def test_forward_kl_topk_rejects_megatron():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.distillation_loss.loss_mode=forward_kl_topk",
+            "actor_rollout_ref.actor.strategy=megatron",
+        ]
+    )
+    with pytest.raises(NotImplementedError, match="FSDP only"):
+        validate_distillation_config(cfg)
+
+
+def test_forward_kl_topk_loss_is_finite_and_zero_for_identical_topk():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=current_policy",
+            "distillation.distillation_loss.loss_mode=forward_kl_topk",
+            "distillation.distillation_loss.topk=2",
+        ]
+    )
+    actor_cfg = SimpleNamespace(loss_agg_mode="token-mean")
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+    logits = torch.tensor(
+        [
+            [[3.0, 1.0, -1.0], [0.5, 2.0, -0.5]],
+            [[1.0, 0.0, 2.0], [0.0, 1.0, 3.0]],
+        ]
+    )
+    teacher_logprobs, teacher_ids = compute_topk_logprobs_from_logits(logits=logits, topk=2)
+    response_mask = torch.tensor([[1, 1], [1, 0]], dtype=torch.bool)
+
+    loss, metrics = compute_forward_kl_topk_distillation_loss(
+        config=actor_cfg,
+        distillation_config=distillation_cfg,
+        student_logits=logits,
+        teacher_logprobs=teacher_logprobs,
+        teacher_ids=teacher_ids,
+        response_mask=response_mask,
+    )
+
+    assert torch.isfinite(loss)
+    assert loss.item() == pytest.approx(0.0, abs=1e-6)
+    assert metrics["distillation/student_mass"] == pytest.approx(metrics["distillation/teacher_mass"], abs=1e-6)
