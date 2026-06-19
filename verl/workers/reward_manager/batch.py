@@ -66,6 +66,7 @@ class BatchRewardManager(AbstractRewardManager):
 
         for i in range(len(data)):
             extras[i]["rollout_reward_scores"] = rollout_reward_scores[i]
+            extras[i]["valid_response_length"] = int(valid_response_lengths[i])
 
         scores = self.compute_score(
             data_sources=data_sources,
