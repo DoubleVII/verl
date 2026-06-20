@@ -145,6 +145,21 @@ def test_forward_kl_topk_reverse_config_loads_for_fsdp():
     assert distillation_cfg.distillation_loss.topk_kl_mode == "reverse"
 
 
+def test_forward_kl_topk_norm_to_one_config_loads_for_fsdp():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=current_policy",
+            "distillation.distillation_loss.loss_mode=forward_kl_topk",
+            "distillation.distillation_loss.topk=4",
+            "distillation.distillation_loss.norm_to_one_for_kl=True",
+        ]
+    )
+    validate_distillation_config(cfg)
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+    assert distillation_cfg.distillation_loss.norm_to_one_for_kl is True
+
+
 def test_forward_kl_topk_rejects_invalid_topk_kl_mode():
     cfg = _compose_ppo(
         [
@@ -233,6 +248,39 @@ def test_forward_kl_topk_reverse_loss_uses_student_weights():
 
     assert torch.allclose(reverse_losses, expected_reverse)
     assert not torch.allclose(reverse_losses, forward_losses)
+
+
+def test_topk_kl_norm_to_one_renormalizes_truncated_support():
+    teacher_logprobs = torch.log(torch.tensor([[0.6, 0.3], [0.4, 0.2]]))
+    student_logprobs = torch.log(torch.tensor([[0.2, 0.5], [0.1, 0.7]]))
+
+    forward_losses = compute_topk_kl_losses(
+        teacher_logprobs=teacher_logprobs,
+        student_logprobs=student_logprobs,
+        topk_kl_mode="forward",
+        norm_to_one_for_kl=True,
+    )
+    teacher_norm = teacher_logprobs - torch.logsumexp(teacher_logprobs, dim=-1, keepdim=True)
+    student_norm = student_logprobs - torch.logsumexp(student_logprobs, dim=-1, keepdim=True)
+    expected_forward = (teacher_norm.exp() * (teacher_norm - student_norm)).sum(dim=-1)
+
+    reverse_losses = compute_topk_kl_losses(
+        teacher_logprobs=teacher_logprobs,
+        student_logprobs=student_logprobs,
+        topk_kl_mode="reverse",
+        norm_to_one_for_kl=True,
+    )
+    expected_reverse = (student_norm.exp() * (student_norm - teacher_norm)).sum(dim=-1)
+    unnormalized_forward = compute_topk_kl_losses(
+        teacher_logprobs=teacher_logprobs,
+        student_logprobs=student_logprobs,
+        topk_kl_mode="forward",
+        norm_to_one_for_kl=False,
+    )
+
+    assert torch.allclose(forward_losses, expected_forward)
+    assert torch.allclose(reverse_losses, expected_reverse)
+    assert not torch.allclose(forward_losses, unnormalized_forward)
 
 
 def test_forward_kl_topk_flat_loss_matches_padded_loss():

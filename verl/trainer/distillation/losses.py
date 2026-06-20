@@ -187,10 +187,14 @@ def compute_topk_kl_losses(
     teacher_logprobs: torch.Tensor,
     student_logprobs: torch.Tensor,
     topk_kl_mode: str,
+    norm_to_one_for_kl: bool = False,
 ) -> torch.Tensor:
     """Compute per-token KL on the teacher top-k support."""
     teacher_logprobs = teacher_logprobs.float()
     student_logprobs = student_logprobs.float()
+    if norm_to_one_for_kl:
+        teacher_logprobs = teacher_logprobs - torch.logsumexp(teacher_logprobs, dim=-1, keepdim=True)
+        student_logprobs = student_logprobs - torch.logsumexp(student_logprobs, dim=-1, keepdim=True)
     if topk_kl_mode == "forward":
         return (teacher_logprobs.exp() * (teacher_logprobs - student_logprobs)).sum(dim=-1)
     if topk_kl_mode == "reverse":
@@ -228,6 +232,7 @@ def compute_forward_kl_topk_distillation_loss(
         teacher_logprobs=teacher_for_loss,
         student_logprobs=student_for_loss,
         topk_kl_mode=loss_config.topk_kl_mode,
+        norm_to_one_for_kl=loss_config.norm_to_one_for_kl,
     )
     distillation_losses = distillation_losses.clamp_min(0.0)
     valid_losses = distillation_losses[response_mask]
@@ -292,6 +297,7 @@ def compute_forward_kl_topk_distillation_loss_flat(
         teacher_logprobs=teacher_for_loss,
         student_logprobs=student_for_loss,
         topk_kl_mode=loss_config.topk_kl_mode,
+        norm_to_one_for_kl=loss_config.norm_to_one_for_kl,
     )
     valid_losses = valid_losses.clamp_min(0.0)
     if loss_config.loss_max_clamp is not None:
