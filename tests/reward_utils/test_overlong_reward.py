@@ -83,3 +83,40 @@ def test_batch_reward_manager_passes_valid_response_length():
 
     assert observed["valid_response_length"] == 3
     assert reward.shape == data.batch["responses"].shape
+
+
+def test_batch_reward_manager_does_not_share_mutated_extra_info_between_samples():
+    shared_extra_info = {}
+    observed_lengths = []
+
+    def compute_score(data_sources, solution_strs, ground_truths, extra_infos, **kwargs):
+        observed_lengths.extend(extra_info["valid_response_length"] for extra_info in extra_infos)
+        return [{"score": 0.0} for _ in extra_infos]
+
+    data = DataProto.from_dict(
+        tensors={
+            "prompts": torch.tensor([[1, 2], [1, 2]]),
+            "responses": torch.tensor([[3, 4, 5, 0], [6, 7, 8, 9]]),
+            "attention_mask": torch.tensor(
+                [
+                    [1, 1, 1, 1, 1, 0],
+                    [1, 1, 1, 1, 1, 1],
+                ]
+            ),
+        },
+        non_tensors={
+            "reward_model": np.array([{"ground_truth": None}, {"ground_truth": None}], dtype=object),
+            "data_source": np.array(["test", "test"], dtype=object),
+            "extra_info": np.array([shared_extra_info, shared_extra_info], dtype=object),
+        },
+    )
+    reward_manager = BatchRewardManager(
+        tokenizer=_DummyTokenizer(),
+        num_examine=0,
+        compute_score=compute_score,
+    )
+
+    reward_manager(data)
+
+    assert observed_lengths == [3, 4]
+    assert shared_extra_info == {}
