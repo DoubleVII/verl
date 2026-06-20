@@ -238,6 +238,58 @@ def compute_forward_kl_topk_distillation_loss(
     return distillation_loss, metrics
 
 
+def compute_forward_kl_topk_distillation_loss_flat(
+    config,
+    distillation_config,
+    student_logits: torch.Tensor,
+    teacher_logprobs: torch.Tensor,
+    teacher_ids: torch.Tensor,
+    response_mask: torch.Tensor,
+):
+    """Compute top-k forward KL from flat valid response logits without building [B, T, V]."""
+    loss_config = distillation_config.distillation_loss
+    response_mask = response_mask.to(bool)
+    valid_teacher_logprobs = teacher_logprobs.to(student_logits.device)[response_mask]
+    valid_teacher_ids = teacher_ids.to(student_logits.device)[response_mask]
+
+    valid_student_logprobs = gather_logprobs_at_ids(
+        logits=student_logits,
+        ids=valid_teacher_ids,
+        use_chunked_topk=True,
+        chunk_size=loss_config.chunked_topk_chunk_size,
+    )
+    teacher_for_loss = valid_teacher_logprobs
+    student_for_loss = valid_student_logprobs
+    if loss_config.log_prob_min_clamp is not None:
+        teacher_for_loss = teacher_for_loss.clamp_min(loss_config.log_prob_min_clamp)
+        student_for_loss = student_for_loss.clamp_min(loss_config.log_prob_min_clamp)
+
+    teacher_probs = teacher_for_loss.float().exp()
+    valid_losses = (teacher_probs * (teacher_for_loss.float() - student_for_loss.float())).sum(dim=-1)
+    valid_losses = valid_losses.clamp_min(0.0)
+    if loss_config.loss_max_clamp is not None:
+        valid_losses = valid_losses.clamp(max=loss_config.loss_max_clamp)
+
+    distillation_losses = torch.zeros(response_mask.shape, dtype=valid_losses.dtype, device=valid_losses.device)
+    distillation_losses[response_mask] = valid_losses
+    distillation_loss = agg_loss(
+        loss_mat=distillation_losses,
+        loss_mask=response_mask,
+        loss_agg_mode=config.loss_agg_mode,
+    )
+
+    valid_student_mass = valid_student_logprobs.float().exp().sum(dim=-1)
+    valid_teacher_mass = valid_teacher_logprobs.float().exp().sum(dim=-1)
+    metrics = {
+        "distillation/loss": distillation_loss.detach().item(),
+        "distillation/loss_min": valid_losses.min().detach().item(),
+        "distillation/loss_max": valid_losses.max().detach().item(),
+        "distillation/student_mass": valid_student_mass.mean().detach().item(),
+        "distillation/teacher_mass": valid_teacher_mass.mean().detach().item(),
+    }
+    return distillation_loss, metrics
+
+
 def combine_policy_and_distillation_loss(policy_loss, distillation_loss, distillation_config):
     loss_config = distillation_config.distillation_loss
     if not loss_config.use_task_rewards:

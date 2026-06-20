@@ -30,6 +30,7 @@ from verl import DataProto
 from verl.trainer.distillation.losses import (
     combine_policy_and_distillation_loss,
     compute_forward_kl_topk_distillation_loss,
+    compute_forward_kl_topk_distillation_loss_flat,
     compute_sampled_distillation_loss,
     compute_topk_logprobs_from_logits,
     is_forward_kl_topk_enabled,
@@ -248,17 +249,10 @@ class DataParallelPPOActor(BasePPOActor):
                             aux_outputs["teacher_ids"] = teacher_ids_full.reshape(batch_size, response_length, topk)
 
                         if compute_distillation_topk:
-                            student_logits_full = torch.zeros(
-                                (batch_size * response_length, response_logits.shape[-1]),
-                                dtype=response_logits.dtype,
-                                device=response_logits.device,
-                            )
-                            student_logits_full[response_position_mask] = response_logits
-                            student_logits = student_logits_full.reshape(batch_size, response_length, response_logits.shape[-1])
-                            distillation_loss, distillation_metrics = compute_forward_kl_topk_distillation_loss(
+                            distillation_loss, distillation_metrics = compute_forward_kl_topk_distillation_loss_flat(
                                 config=self.config,
                                 distillation_config=self.distillation_config,
-                                student_logits=student_logits,
+                                student_logits=response_logits,
                                 teacher_logprobs=micro_batch["teacher_logprobs"],
                                 teacher_ids=micro_batch["teacher_ids"],
                                 response_mask=micro_batch["response_mask"],

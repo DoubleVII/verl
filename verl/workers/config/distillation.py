@@ -56,7 +56,7 @@ class DistillationLossConfig(BaseConfig):
     clip_ratio: float = 0.2
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.2
-    use_chunked_topk: bool = False
+    use_chunked_topk: bool = True
     chunked_topk_chunk_size: int = 4096
     global_batch_info: dict = field(default_factory=dict)
 
