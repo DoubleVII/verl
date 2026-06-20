@@ -251,6 +251,12 @@ def compute_forward_kl_topk_distillation_loss_flat(
     response_mask = response_mask.to(bool)
     valid_teacher_logprobs = teacher_logprobs.to(student_logits.device)[response_mask]
     valid_teacher_ids = teacher_ids.to(student_logits.device)[response_mask]
+    if student_logits.shape[0] != valid_teacher_ids.shape[0]:
+        raise ValueError(
+            "Flat forward_kl_topk inputs are misaligned: "
+            f"student_logits has {student_logits.shape[0]} rows but response_mask selects "
+            f"{valid_teacher_ids.shape[0]} teacher rows."
+        )
 
     valid_student_logprobs = gather_logprobs_at_ids(
         logits=student_logits,

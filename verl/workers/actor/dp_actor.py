@@ -210,17 +210,19 @@ class DataParallelPPOActor(BasePPOActor):
                     )
 
                     if compute_topk or compute_distillation_topk:
-                        response_mask_full = torch.zeros(
-                            (batch_size, seqlen), dtype=torch.bool, device=attention_mask.device
-                        )
-                        response_mask_full[:, -response_length - 1 : -1] = True
-                        response_mask_full = response_mask_full & attention_mask.bool()
-                        response_indices_mask = response_mask_full.reshape(-1)[indices]
-                        response_position_mask = response_mask_full[:, -response_length - 1 : -1].reshape(-1)
                         if self.use_ulysses_sp:
                             raise NotImplementedError(
                                 "forward_kl_topk does not support FSDP Ulysses sequence parallelism yet."
                             )
+                        if compute_distillation_topk:
+                            response_mask = micro_batch["response_mask"].to(device=attention_mask.device, dtype=torch.bool)
+                        else:
+                            response_mask = attention_mask[:, -response_length:].to(torch.bool)
+                        response_mask_full = torch.zeros(
+                            (batch_size, seqlen), dtype=torch.bool, device=attention_mask.device
+                        )
+                        response_mask_full[:, -response_length - 1 : -1] = response_mask
+                        response_indices_mask = response_mask_full.reshape(-1)[indices]
                         response_logits = logits_rmpad[response_indices_mask]
 
                         if compute_topk:
@@ -232,21 +234,19 @@ class DataParallelPPOActor(BasePPOActor):
                                 chunk_size=self.distillation_config.distillation_loss.chunked_topk_chunk_size,
                             )
                             teacher_logprobs_full = torch.zeros(
-                                (batch_size * response_length, topk),
+                                (*response_mask.shape, topk),
                                 dtype=teacher_logprobs_flat.dtype,
                                 device=teacher_logprobs_flat.device,
                             )
                             teacher_ids_full = torch.zeros(
-                                (batch_size * response_length, topk),
+                                (*response_mask.shape, topk),
                                 dtype=teacher_ids_flat.dtype,
                                 device=teacher_ids_flat.device,
                             )
-                            teacher_logprobs_full[response_position_mask] = teacher_logprobs_flat
-                            teacher_ids_full[response_position_mask] = teacher_ids_flat
-                            aux_outputs["teacher_logprobs"] = teacher_logprobs_full.reshape(
-                                batch_size, response_length, topk
-                            )
-                            aux_outputs["teacher_ids"] = teacher_ids_full.reshape(batch_size, response_length, topk)
+                            teacher_logprobs_full[response_mask] = teacher_logprobs_flat
+                            teacher_ids_full[response_mask] = teacher_ids_flat
+                            aux_outputs["teacher_logprobs"] = teacher_logprobs_full
+                            aux_outputs["teacher_ids"] = teacher_ids_full
 
                         if compute_distillation_topk:
                             distillation_loss, distillation_metrics = compute_forward_kl_topk_distillation_loss_flat(

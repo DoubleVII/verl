@@ -226,3 +226,44 @@ def test_forward_kl_topk_flat_loss_matches_padded_loss():
     )
 
     assert flat_loss.item() == pytest.approx(padded_loss.item(), abs=1e-6)
+
+
+def test_forward_kl_topk_flat_loss_uses_response_mask_alignment():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=current_policy",
+            "distillation.distillation_loss.loss_mode=forward_kl_topk",
+            "distillation.distillation_loss.topk=2",
+        ]
+    )
+    actor_cfg = SimpleNamespace(loss_agg_mode="token-mean")
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+    student_logits = torch.tensor(
+        [
+            [[3.0, 1.0, -1.0], [0.5, 2.0, -0.5], [1.0, 0.0, 2.0]],
+            [[0.0, 1.0, 3.0], [2.0, 0.0, 1.0], [0.0, 3.0, 1.0]],
+        ]
+    )
+    teacher_logits = student_logits + 0.1
+    teacher_logprobs, teacher_ids = compute_topk_logprobs_from_logits(logits=teacher_logits, topk=2)
+    response_mask = torch.tensor([[1, 0, 1], [0, 1, 0]], dtype=torch.bool)
+
+    padded_loss, _ = compute_forward_kl_topk_distillation_loss(
+        config=actor_cfg,
+        distillation_config=distillation_cfg,
+        student_logits=student_logits,
+        teacher_logprobs=teacher_logprobs,
+        teacher_ids=teacher_ids,
+        response_mask=response_mask,
+    )
+    flat_loss, _ = compute_forward_kl_topk_distillation_loss_flat(
+        config=actor_cfg,
+        distillation_config=distillation_cfg,
+        student_logits=student_logits[response_mask],
+        teacher_logprobs=teacher_logprobs,
+        teacher_ids=teacher_ids,
+        response_mask=response_mask,
+    )
+
+    assert flat_loss.item() == pytest.approx(padded_loss.item(), abs=1e-6)
