@@ -56,6 +56,7 @@ class DistillationLossConfig(BaseConfig):
     clip_ratio: float = 0.2
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.2
+    topk_kl_mode: str = "forward"
     use_chunked_topk: bool = True
     chunked_topk_chunk_size: int = 4096
     global_batch_info: dict = field(default_factory=dict)
@@ -66,6 +67,8 @@ class DistillationLossConfig(BaseConfig):
             raise ValueError(f"Unsupported distillation loss_mode={self.loss_mode!r}. Supported modes: {sorted(supported)}")
         if self.loss_mode == "forward_kl_topk" and self.topk is None:
             raise ValueError("distillation.distillation_loss.topk must be set when loss_mode=forward_kl_topk.")
+        if self.topk_kl_mode not in {"forward", "reverse"}:
+            raise ValueError("distillation.distillation_loss.topk_kl_mode must be 'forward' or 'reverse'.")
         if self.policy_loss_mode != "vanilla":
             raise NotImplementedError(
                 "Only distillation.distillation_loss.policy_loss_mode=vanilla is supported when "

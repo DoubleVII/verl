@@ -183,6 +183,21 @@ def gather_logprobs_at_ids(
     return F.log_softmax(logits, dim=-1).gather(dim=-1, index=ids)
 
 
+def compute_topk_kl_losses(
+    teacher_logprobs: torch.Tensor,
+    student_logprobs: torch.Tensor,
+    topk_kl_mode: str,
+) -> torch.Tensor:
+    """Compute per-token KL on the teacher top-k support."""
+    teacher_logprobs = teacher_logprobs.float()
+    student_logprobs = student_logprobs.float()
+    if topk_kl_mode == "forward":
+        return (teacher_logprobs.exp() * (teacher_logprobs - student_logprobs)).sum(dim=-1)
+    if topk_kl_mode == "reverse":
+        return (student_logprobs.exp() * (student_logprobs - teacher_logprobs)).sum(dim=-1)
+    raise ValueError(f"Unsupported distillation.distillation_loss.topk_kl_mode={topk_kl_mode!r}.")
+
+
 def compute_forward_kl_topk_distillation_loss(
     config,
     distillation_config,
@@ -209,8 +224,11 @@ def compute_forward_kl_topk_distillation_loss(
         teacher_for_loss = teacher_for_loss.clamp_min(loss_config.log_prob_min_clamp)
         student_for_loss = student_for_loss.clamp_min(loss_config.log_prob_min_clamp)
 
-    teacher_probs = teacher_for_loss.float().exp()
-    distillation_losses = (teacher_probs * (teacher_for_loss.float() - student_for_loss.float())).sum(dim=-1)
+    distillation_losses = compute_topk_kl_losses(
+        teacher_logprobs=teacher_for_loss,
+        student_logprobs=student_for_loss,
+        topk_kl_mode=loss_config.topk_kl_mode,
+    )
     distillation_losses = distillation_losses.clamp_min(0.0)
     valid_losses = distillation_losses[response_mask]
 
@@ -270,8 +288,11 @@ def compute_forward_kl_topk_distillation_loss_flat(
         teacher_for_loss = teacher_for_loss.clamp_min(loss_config.log_prob_min_clamp)
         student_for_loss = student_for_loss.clamp_min(loss_config.log_prob_min_clamp)
 
-    teacher_probs = teacher_for_loss.float().exp()
-    valid_losses = (teacher_probs * (teacher_for_loss.float() - student_for_loss.float())).sum(dim=-1)
+    valid_losses = compute_topk_kl_losses(
+        teacher_logprobs=teacher_for_loss,
+        student_logprobs=student_for_loss,
+        topk_kl_mode=loss_config.topk_kl_mode,
+    )
     valid_losses = valid_losses.clamp_min(0.0)
     if loss_config.loss_max_clamp is not None:
         valid_losses = valid_losses.clamp(max=loss_config.loss_max_clamp)
