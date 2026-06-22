@@ -1979,6 +1979,27 @@ def _build_genrm_actor_compat_config(config: DictConfig, actor_config: Optional[
     return merged_cfg
 
 
+def _build_genrm_rollout_config(config: DictConfig) -> DictConfig:
+    """Build rollout-only GenRM config with static weights loaded by the inference engine."""
+
+    rollout_defaults = asdict(RolloutConfig())
+    rollout_defaults.pop("profiler", None)
+    merged_cfg = OmegaConf.merge(OmegaConf.create({"rollout": rollout_defaults}), config)
+
+    with open_dict(merged_cfg.rollout):
+        if merged_cfg.rollout.get("load_format", "dummy") == "dummy":
+            merged_cfg.rollout.load_format = "auto"
+
+    if OmegaConf.select(merged_cfg, "model") is not None:
+        with open_dict(merged_cfg.model):
+            if "fsdp_config" in merged_cfg.model:
+                del merged_cfg.model["fsdp_config"]
+            if "input_tokenizer" in merged_cfg.model:
+                del merged_cfg.model["input_tokenizer"]
+
+    return merged_cfg
+
+
 class GenerativeRewardModelWorker(ActorRolloutRefWorker):
     def __init__(self, config: DictConfig, **kwargs):
 
@@ -2105,6 +2126,138 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
         return token_level_scores
 
     
+
+class GenerativeRewardModelRolloutWorker(Worker, DistProfilerExtension):
+    """GenRM worker that lets the rollout engine load static reward-model weights directly."""
+
+    def __init__(self, config: DictConfig, **kwargs):
+        Worker.__init__(self)
+
+        input_tokenizer_path = OmegaConf.select(config, "model.input_tokenizer")
+        tokenizer_path = config.model.path
+        self.config = _build_genrm_rollout_config(config)
+        self.custom_processor = None
+        self._rollout_released = False
+
+        if not torch.distributed.is_initialized():
+            rank = int(os.environ.get("RANK", 0))
+            world_size = int(os.environ.get("WORLD_SIZE", 1))
+            torch.distributed.init_process_group(
+                backend=f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}",
+                rank=rank,
+                world_size=world_size,
+                timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
+                init_method=os.environ.get("DIST_INIT_METHOD", None),
+            )
+
+        omega_profiler_config = self.config.get("profiler", {})
+        profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
+        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
+            tool_config = omega_conf_to_dataclass(
+                omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
+            )
+        else:
+            tool_config = None
+        DistProfilerExtension.__init__(
+            self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
+        )
+
+        self.init_tokenizer_processor(tokenizer_path, input_tokenizer_path)
+
+    init_tokenizer_processor = GenerativeRewardModelWorker.init_tokenizer_processor
+    _expand_to_token_level = GenerativeRewardModelWorker._expand_to_token_level
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        import_external_libs(self.config.model.get("external_lib", None))
+
+        rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout, dataclass_type=RolloutConfig)
+        model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model, dataclass_type=HFModelConfig)
+        self.model_config = model_config
+        self.generation_config = model_config.generation_config
+
+        infer_tp = self.config.rollout.tensor_model_parallel_size * self.config.rollout.data_parallel_size
+        infer_pp = self.config.rollout.pipeline_model_parallel_size
+        infer_world_size = infer_tp * infer_pp
+        dp = self.world_size // infer_world_size
+        assert self.world_size % infer_world_size == 0, (
+            f"rollout world_size: {self.world_size} is not divisible by infer_world_size: {infer_world_size}"
+        )
+        rollout_device_mesh = init_device_mesh(
+            device_name, mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
+        )
+
+        if self.config.rollout.name == "hf":
+            self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
+        else:
+            is_collect = (
+                rollout_device_mesh["infer_tp"].get_local_rank() == 0
+                and rollout_device_mesh["infer_pp"].get_local_rank() == 0
+            )
+            self._register_dispatch_collect_info(
+                "rollout", dp_rank=rollout_device_mesh["dp"].get_local_rank(), is_collect=is_collect
+            )
+
+        log_gpu_memory_usage(f"Before building static {self.config.rollout.name} GenRM rollout", logger=logger)
+        self.rollout = get_rollout_class(rollout_config.name, rollout_config.mode)(
+            config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
+        )
+        log_gpu_memory_usage(f"After building static {self.config.rollout.name} GenRM rollout", logger=logger)
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
+    @DistProfiler.annotate(color="brown", role="reward_generate")
+    def compute_rm_score(self, data: DataProto):
+        data = data.to(get_device_id())
+
+        meta_info = {
+            "eos_token_id": self.generation_config.eos_token_id
+            if self.generation_config is not None
+            else self.tokenizer.eos_token_id,
+            "pad_token_id": self.generation_config.pad_token_id
+            if self.generation_config is not None
+            else self.tokenizer.pad_token_id,
+        }
+        data.meta_info.update(meta_info)
+
+        if not self.custom_processor or not hasattr(self.custom_processor, "compute_scores"):
+            raise NotImplementedError("Please provide a custom_processor with compute_scores method.")
+
+        loop = get_event_loop()
+        if self.config.rollout.free_cache_engine and self._rollout_released:
+            loop.run_until_complete(self.rollout.resume(tags=["weights", "kv_cache"]))
+            self._rollout_released = False
+
+        timing_generate = {}
+        with simple_timer("generate_rewards", timing_generate):
+            reward_scores = self.custom_processor.compute_scores(data, self.rollout.generate_for_rm)
+
+        if not isinstance(reward_scores, torch.Tensor):
+            reward_tensor = torch.tensor(reward_scores, dtype=torch.float32)
+        else:
+            reward_tensor = reward_scores
+
+        if self.config.rollout.free_cache_engine:
+            loop.run_until_complete(self.rollout.release())
+            self._rollout_released = True
+
+        timing_generate_topk_ratio, timing_generate_min, timing_generate_max = topk_reduce_ratio_min_max(
+            timing_generate["generate_rewards"]
+        )
+        timing_generate = reduce_timing(timing_generate)
+        timing_generate.update(
+            {
+                "reward_timing/max": timing_generate_max,
+                "reward_timing/min": timing_generate_min,
+                "reward_timing/topk_ratio": timing_generate_topk_ratio,
+            }
+        )
+
+        token_level_scores = self._expand_to_token_level(data, reward_tensor)
+        output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
+        output = output.to("cpu")
+        get_torch_device().empty_cache()
+        return output
+
 
 # ================================= Async related workers =================================
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):

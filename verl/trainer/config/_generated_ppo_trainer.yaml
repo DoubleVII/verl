@@ -417,6 +417,7 @@ reward_model:
   n_gpus_per_node: 0
   nnodes: 0
   strategy: fsdp
+  genrm_engine_mode: hybrid
   model:
     input_tokenizer: ${actor_rollout_ref.model.path}
     path: ~/models/FsfairX-LLaMA3-RM-v0.1

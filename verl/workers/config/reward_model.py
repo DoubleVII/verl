@@ -48,6 +48,7 @@ class RewardModelConfig(BaseConfig):
     enable_resource_pool: bool = False
     n_gpus_per_node: int = 0
     nnodes: int = 0
+    genrm_engine_mode: str = "hybrid"
 
     # reward model args
     rollout: RolloutConfig = field(default_factory=RolloutConfig)

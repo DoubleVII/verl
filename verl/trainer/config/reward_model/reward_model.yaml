@@ -15,6 +15,9 @@ nnodes: 0
 # FSDP strategy: "fsdp" or "fsdp2"
 strategy: ???
 
+# GenRM engine mode: "hybrid" keeps FSDP-to-rollout weight sync; "rollout" loads static weights directly.
+genrm_engine_mode: hybrid
+
 # model config for reward scoring
 model:
 
