@@ -15,7 +15,12 @@ import os
 
 from omegaconf import OmegaConf
 
-from verl.workers.fsdp_workers import ActorRolloutRefWorker
+from verl.utils.config import omega_conf_to_dataclass
+from verl.workers.fsdp_workers import (
+    ActorRolloutRefWorker,
+    GenerativeRewardModelWorker,
+    _build_genrm_actor_compat_config,
+)
 
 
 def test_actor_rollout_ref_worker_actor_ref_model():
@@ -75,3 +80,132 @@ def test_actor_rollout_ref_worker_actor_ref_model():
 
     model_config = actor_rollout_ref_worker.ref_module_fsdp._fsdp_wrapped_module.config
     assert model_config.hidden_size == 896
+
+
+def test_genrm_actor_compat_config_prefers_reward_model_fsdp_config():
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {
+                "path": "/tmp/reward-model",
+                "input_tokenizer": "/tmp/policy-tokenizer",
+                "fsdp_config": {"strategy": "fsdp2", "fsdp_size": 4, "forward_prefetch": True},
+            },
+            "rollout": {"name": "sglang", "tensor_model_parallel_size": 1},
+        }
+    )
+    actor_config = OmegaConf.create(
+        {
+            "actor": {
+                "strategy": "fsdp",
+                "ppo_micro_batch_size_per_gpu": 64,
+                "profiler": {"tool": "torch_memory"},
+                "fsdp_config": {"strategy": "fsdp", "fsdp_size": 8},
+            }
+        }
+    )
+    original_config = OmegaConf.to_container(config, resolve=False)
+    original_actor_config = OmegaConf.to_container(actor_config, resolve=False)
+
+    merged_cfg = _build_genrm_actor_compat_config(config, actor_config=actor_config)
+
+    assert merged_cfg.actor.strategy == "fsdp2"
+    assert merged_cfg.actor.fsdp_config.strategy == "fsdp2"
+    assert merged_cfg.actor.fsdp_config.fsdp_size == 4
+    assert merged_cfg.actor.fsdp_config.forward_prefetch is True
+    assert merged_cfg.actor.ppo_micro_batch_size_per_gpu == 1
+    assert merged_cfg.actor.profiler == {}
+    assert "model_config" not in merged_cfg.actor
+    assert "fsdp_config" not in merged_cfg.model
+    assert "input_tokenizer" not in merged_cfg.model
+
+    assert OmegaConf.to_container(config, resolve=False) == original_config
+    assert OmegaConf.to_container(actor_config, resolve=False) == original_actor_config
+
+
+def test_genrm_actor_compat_config_uses_actor_fsdp_as_fallback_only():
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {"path": "/tmp/reward-model", "input_tokenizer": None},
+            "rollout": {"name": "sglang"},
+        }
+    )
+    actor_config = OmegaConf.create(
+        {
+            "actor": {
+                "strategy": "fsdp",
+                "ppo_micro_batch_size_per_gpu": 64,
+                "profiler": {"tool": "torch_memory"},
+                "fsdp_config": {"strategy": "fsdp", "fsdp_size": 2, "param_offload": True},
+            }
+        }
+    )
+
+    merged_cfg = _build_genrm_actor_compat_config(config, actor_config=actor_config)
+
+    assert merged_cfg.actor.strategy == "fsdp"
+    assert merged_cfg.actor.fsdp_config.strategy == "fsdp"
+    assert merged_cfg.actor.fsdp_config.fsdp_size == 2
+    assert merged_cfg.actor.fsdp_config.param_offload is True
+    assert merged_cfg.actor.ppo_micro_batch_size_per_gpu == 1
+    assert merged_cfg.actor.profiler == {}
+
+
+def test_genrm_actor_compat_config_defaults_to_fsdp2_dataclass_config():
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {"path": "/tmp/reward-model", "input_tokenizer": None},
+            "rollout": {"name": "sglang"},
+        }
+    )
+
+    merged_cfg = _build_genrm_actor_compat_config(config)
+    actor_cfg = omega_conf_to_dataclass(merged_cfg.actor)
+
+    assert merged_cfg.actor.strategy == "fsdp2"
+    assert merged_cfg.actor.fsdp_config.strategy == "fsdp2"
+    assert merged_cfg.actor.fsdp_config.fsdp_size == -1
+    assert actor_cfg.strategy == "fsdp2"
+    assert actor_cfg.fsdp_config.strategy == "fsdp2"
+    assert actor_cfg.fsdp_config.fsdp_size == -1
+
+
+def test_genrm_worker_bootstraps_hybrid_rollout_without_loading_model(monkeypatch):
+    captured = {}
+
+    def fake_actor_rollout_ref_init(self, config, role, **kwargs):
+        captured["config"] = config
+        captured["role"] = role
+        captured["kwargs"] = kwargs
+
+    def fake_init_tokenizer_processor(self, tokenizer_path, input_tokenizer_path=None):
+        captured["tokenizer_path"] = tokenizer_path
+        captured["input_tokenizer_path"] = input_tokenizer_path
+
+    monkeypatch.setattr(ActorRolloutRefWorker, "__init__", fake_actor_rollout_ref_init)
+    monkeypatch.setattr(GenerativeRewardModelWorker, "init_tokenizer_processor", fake_init_tokenizer_processor)
+
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {
+                "path": "/tmp/reward-model",
+                "input_tokenizer": "/tmp/policy-tokenizer",
+                "fsdp_config": {"strategy": "fsdp2", "fsdp_size": 1},
+            },
+            "rollout": {"name": "sglang", "tensor_model_parallel_size": 1},
+        }
+    )
+
+    GenerativeRewardModelWorker(config)
+
+    assert captured["role"] == "actor_rollout"
+    assert captured["kwargs"]["disable_optim"] is True
+    assert captured["config"].actor.ppo_micro_batch_size_per_gpu == 1
+    assert captured["config"].actor.fsdp_config.fsdp_size == 1
+    assert "fsdp_config" not in captured["config"].model
+    assert "input_tokenizer" not in captured["config"].model
+    assert captured["tokenizer_path"] == "/tmp/reward-model"
+    assert captured["input_tokenizer_path"] == "/tmp/policy-tokenizer"

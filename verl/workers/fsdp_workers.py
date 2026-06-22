@@ -86,7 +86,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.ray_utils import get_event_loop
-from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig, FSDPActorConfig
+from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
@@ -1923,58 +1923,70 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         return output
 
 
+def _build_genrm_actor_compat_config(config: DictConfig, actor_config: Optional[DictConfig] = None) -> DictConfig:
+    """Build the minimal actor-like config needed for GenRM hybrid rollout.
+
+    Generative reward model scoring needs the hybrid actor_rollout path so
+    rollout_mode() syncs the FSDP reward-model weights into the rollout engine.
+    A standalone rollout worker does not perform that sync before generation.
+    """
+
+    rollout_defaults = asdict(RolloutConfig())
+    rollout_defaults.pop("profiler", None)
+
+    fsdp_cfg = OmegaConf.select(config, "model.fsdp_config")
+    if fsdp_cfg is None and actor_config is not None:
+        fsdp_cfg = OmegaConf.select(actor_config, "actor.fsdp_config")
+    if fsdp_cfg is None:
+        fsdp_cfg = asdict(FSDPEngineConfig(strategy="fsdp2"))
+
+    fsdp_cfg = OmegaConf.create(fsdp_cfg)
+    strategy = OmegaConf.select(config, "strategy")
+    if strategy not in {"fsdp", "fsdp2"}:
+        strategy = OmegaConf.select(fsdp_cfg, "strategy") or "fsdp2"
+    with open_dict(fsdp_cfg):
+        fsdp_cfg._target_ = "verl.workers.config.FSDPEngineConfig"
+        fsdp_cfg.strategy = strategy
+
+    actor_cfg = {
+        "_target_": "verl.workers.config.FSDPActorConfig",
+        "strategy": strategy,
+        "fsdp_config": OmegaConf.to_container(fsdp_cfg, resolve=False),
+        "ppo_micro_batch_size_per_gpu": 1,
+        "use_dynamic_bsz": True,
+        "ulysses_sequence_parallel_size": OmegaConf.select(config, "ulysses_sequence_parallel_size", default=1),
+        "profiler": {},
+    }
+
+    config_without_actor = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
+    if "actor" in config_without_actor:
+        with open_dict(config_without_actor):
+            del config_without_actor["actor"]
+
+    merged_cfg = OmegaConf.merge(
+        OmegaConf.create({"rollout": rollout_defaults}),
+        config_without_actor,
+        OmegaConf.create({"actor": actor_cfg}),
+    )
+
+    if OmegaConf.select(merged_cfg, "model") is not None:
+        with open_dict(merged_cfg.model):
+            if "fsdp_config" in merged_cfg.model:
+                del merged_cfg.model["fsdp_config"]
+            if "input_tokenizer" in merged_cfg.model:
+                del merged_cfg.model["input_tokenizer"]
+
+    return merged_cfg
+
+
 class GenerativeRewardModelWorker(ActorRolloutRefWorker):
     def __init__(self, config: DictConfig, **kwargs):
 
         actor_config = kwargs.get("actor_config", None)
 
-        input_tokenizer_path = config.model.input_tokenizer
+        input_tokenizer_path = OmegaConf.select(config, "model.input_tokenizer")
         tokenizer_path = config.model.path
-
-        # Avoid mutating the incoming OmegaConf config. If 'actor' is missing,
-        # create a working copy that includes a default FSDP actor config.
-        if OmegaConf.select(config, "actor") is None:
-            actor_cfg_dict = asdict(FSDPActorConfig(use_dynamic_bsz=True))
-            merged_cfg = OmegaConf.merge(OmegaConf.create({"actor": actor_cfg_dict}), config)
-        else:
-            merged_cfg = config
-
-        merged_cfg.actor.strategy = "fsdp2"
-
-        # Ensure rollout has structured defaults so missing keys like
-        # 'log_prob_micro_batch_size' exist and are initialized to None.
-        rollout_defaults = asdict(RolloutConfig())
-        # # Ensure profiler is a dict-like config (not None) to avoid `.get` on None
-        if "profiler" in rollout_defaults:
-            del rollout_defaults["profiler"]
-        merged_cfg = OmegaConf.merge(OmegaConf.create({"rollout": rollout_defaults}), merged_cfg)
-
-        # Move model.fsdp_config to actor.fsdp_config, then drop it from model.
-        # Also drop model.input_tokenizer to match HFModelConfig schema.
-        model_fsdp_cfg = OmegaConf.select(merged_cfg, "model.fsdp_config")
-        with open_dict(merged_cfg):
-            # initialize actor section if still missing (defensive)
-            if OmegaConf.select(merged_cfg, "actor") is None:
-                merged_cfg.actor = asdict(FSDPActorConfig(use_dynamic_bsz=True))
-            # set actor.fsdp_config from model.fsdp_config when present
-            if model_fsdp_cfg is not None:
-                merged_cfg.actor.fsdp_config = model_fsdp_cfg
-            
-            del merged_cfg.actor["model_config"]
-            merged_cfg.actor = actor_config.actor
-            merged_cfg.actor.ppo_micro_batch_size_per_gpu = 1
-            # merged_cfg.actor.fsdp_config = actor_config.actor.fsdp_config
-            
-
-            if "profiler" in merged_cfg.actor:
-                del merged_cfg.actor["profiler"]
-        # safely remove unsupported model keys
-        if OmegaConf.select(merged_cfg, "model") is not None:
-            with open_dict(merged_cfg.model):
-                if "fsdp_config" in merged_cfg.model:
-                    del merged_cfg.model["fsdp_config"]
-                if "input_tokenizer" in merged_cfg.model:
-                    del merged_cfg.model["input_tokenizer"]
+        merged_cfg = _build_genrm_actor_compat_config(config, actor_config=actor_config)
 
         super().__init__(merged_cfg, role="actor_rollout", disable_optim=True, **kwargs)
 
