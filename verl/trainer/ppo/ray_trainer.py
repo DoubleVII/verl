@@ -50,6 +50,12 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.mismatch_helper import compute_rollout_importance_weights
+from verl.trainer.ppo.opsd_utils import (
+    OPSD_TEACHER_PROMPT_KEY,
+    attach_opsd_metadata,
+    build_opsd_teacher_batch,
+    distillation_uses_data_teacher_prompt,
+)
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.trainer.distillation.losses import is_distillation_enabled, is_forward_kl_topk_enabled
@@ -329,6 +335,7 @@ class RayPPOTrainer:
             self.config.distillation.teacher.source if self.use_distillation else None
         )
         self.distillation_forward_kl_topk = is_forward_kl_topk_enabled(self.config.get("distillation"))
+        self.distillation_data_teacher_prompt = distillation_uses_data_teacher_prompt(self.config)
         if self.use_distillation:
             with open_dict(self.config.actor_rollout_ref):
                 self.config.actor_rollout_ref.distillation = self.config.distillation
@@ -522,6 +529,8 @@ class RayPPOTrainer:
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid", "ability"}) & batch.non_tensor_batch.keys()
+        if self.use_distillation and self.distillation_data_teacher_prompt and OPSD_TEACHER_PROMPT_KEY in batch.non_tensor_batch:
+            reward_model_keys.add(OPSD_TEACHER_PROMPT_KEY)
         uid_for_generation = None
 
         if self.config.actor_rollout_ref.rollout.multi_turn.shared_first_turn_by_uid:
@@ -1191,6 +1200,7 @@ class RayPPOTrainer:
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
 
+                attach_opsd_metadata(batch, self.config)
                 gen_batch = self._get_gen_batch(batch)
 
                 # pass global_steps to trace
@@ -1304,7 +1314,11 @@ class RayPPOTrainer:
 
                     if self.use_distillation and self.distillation_teacher_source == "ref_policy":
                         with marked_timer("distillation_teacher", timing_raw, color="olive"):
-                            teacher_logprobs = self.ref_policy_wg.compute_ref_log_prob(batch)
+                            teacher_input_batch = batch
+                            if self.distillation_data_teacher_prompt:
+                                teacher_input_batch = build_opsd_teacher_batch(batch, self.tokenizer, self.config)
+                                metrics["opsd/enabled"] = 1.0
+                            teacher_logprobs = self.ref_policy_wg.compute_ref_log_prob(teacher_input_batch)
                             if not self.distillation_forward_kl_topk:
                                 teacher_logprobs.batch["teacher_logprobs"] = teacher_logprobs.batch.pop("ref_log_prob")
                             elif "ref_log_prob" in teacher_logprobs.batch:

@@ -11,6 +11,8 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 def _trainer(shared_first_turn_by_uid: bool):
     trainer = object.__new__(RayPPOTrainer)
     trainer.async_rollout_mode = False
+    trainer.use_distillation = False
+    trainer.distillation_data_teacher_prompt = False
     trainer.config = SimpleNamespace(
         actor_rollout_ref=SimpleNamespace(
             rollout=SimpleNamespace(

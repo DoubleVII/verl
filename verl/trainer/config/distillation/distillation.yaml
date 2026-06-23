@@ -12,6 +12,8 @@ teacher:
   _target_: verl.workers.config.DistillationTeacherConfig
   source: ref_policy
   ref_model_path: null
+  prompt_source: actor_prompt
+  teacher_prompt_path: extra_info.teacher_prompt
 
 # Distillation loss config.
 distillation_loss:

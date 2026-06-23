@@ -36,6 +36,47 @@ def test_distillation_config_disabled_loads():
     validate_distillation_config(cfg)
 
 
+def test_data_teacher_prompt_ref_policy_config_loads():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=ref_policy",
+            "distillation.teacher.prompt_source=data_teacher_prompt",
+        ]
+    )
+    validate_distillation_config(cfg)
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+    assert distillation_cfg.teacher.prompt_source == "data_teacher_prompt"
+    assert distillation_cfg.teacher.teacher_prompt_path == "extra_info.teacher_prompt"
+
+
+def test_data_teacher_prompt_rejects_current_policy():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=current_policy",
+            "distillation.teacher.prompt_source=data_teacher_prompt",
+        ]
+    )
+    with pytest.raises(NotImplementedError, match="ref_policy only"):
+        validate_distillation_config(cfg)
+
+
+def test_forward_kl_topk_data_teacher_prompt_ref_policy_config_loads():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=ref_policy",
+            "distillation.teacher.prompt_source=data_teacher_prompt",
+            "distillation.distillation_loss.loss_mode=forward_kl_topk",
+            "distillation.distillation_loss.topk=4",
+        ]
+    )
+    validate_distillation_config(cfg)
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+    assert distillation_cfg.distillation_loss.loss_mode == "forward_kl_topk"
+
+
 def test_ref_policy_teacher_rejects_reference_kl_loss():
     cfg = _compose_ppo(
         [

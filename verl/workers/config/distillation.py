@@ -26,6 +26,8 @@ class DistillationTeacherConfig(BaseConfig):
 
     source: str = "ref_policy"
     ref_model_path: Optional[str] = None
+    prompt_source: str = "actor_prompt"
+    teacher_prompt_path: str = "extra_info.teacher_prompt"
 
     def __post_init__(self):
         if self.source not in {"ref_policy", "current_policy", "reward_model"}:
@@ -38,6 +40,11 @@ class DistillationTeacherConfig(BaseConfig):
             raise NotImplementedError(
                 "distillation.teacher.source=reward_model is reserved for future GenRM-as-teacher support "
                 "and is not implemented yet."
+            )
+        if self.prompt_source not in {"actor_prompt", "data_teacher_prompt"}:
+            raise ValueError(
+                f"Unsupported distillation.teacher.prompt_source={self.prompt_source!r}. "
+                "Supported values are 'actor_prompt' and 'data_teacher_prompt'."
             )
 
 

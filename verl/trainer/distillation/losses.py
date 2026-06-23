@@ -30,12 +30,18 @@ def validate_distillation_config(config) -> None:
         return
 
     teacher_source = distillation_config.teacher.source
+    teacher_prompt_source = distillation_config.teacher.get("prompt_source", "actor_prompt")
     loss_mode = distillation_config.distillation_loss.loss_mode
     actor_strategy = config.actor_rollout_ref.actor.strategy
     if teacher_source == "reward_model":
         raise NotImplementedError(
             "distillation.teacher.source=reward_model is reserved for future GenRM-as-teacher support "
             "and is not implemented yet."
+        )
+    if teacher_prompt_source == "data_teacher_prompt" and teacher_source != "ref_policy":
+        raise NotImplementedError(
+            "distillation.teacher.prompt_source=data_teacher_prompt currently supports "
+            "distillation.teacher.source=ref_policy only."
         )
     if loss_mode == "forward_kl_topk":
         if actor_strategy not in {"fsdp", "fsdp2"}:
