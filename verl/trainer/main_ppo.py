@@ -103,6 +103,17 @@ def run_ppo(config, task_runner_class=None) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
+def _select_genrm_reward_model_worker(config):
+    genrm_engine_mode = config.reward_model.get("genrm_engine_mode", "hybrid")
+    if genrm_engine_mode == "hybrid":
+        from verl.workers.fsdp_workers import GenerativeRewardModelWorker as RewardModelWorker
+    elif genrm_engine_mode == "rollout":
+        from verl.workers.fsdp_workers import GenerativeRewardModelRolloutWorker as RewardModelWorker
+    else:
+        raise ValueError(f"Invalid reward_model.genrm_engine_mode: {genrm_engine_mode}")
+    return RewardModelWorker
+
+
 class TaskRunner:
     """Ray remote class for executing distributed PPO training tasks.
 
@@ -232,7 +243,7 @@ class TaskRunner:
                 elif config.reward_model.strategy == "megatron":
                     from verl.workers.megatron_workers import RewardModelWorker
                 elif config.reward_model.strategy == "GenRM":
-                    from verl.workers.fsdp_workers import GenerativeRewardModelWorker as RewardModelWorker
+                    RewardModelWorker = _select_genrm_reward_model_worker(config)
                 elif config.reward_model.strategy == "seedx":
                     from verl.workers.fsdp_workers import SeedXRewardModelWorker as RewardModelWorker
                 elif config.reward_model.strategy == "vheadRM":

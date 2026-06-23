@@ -12,10 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from types import SimpleNamespace
 
+import torch
 from omegaconf import OmegaConf
 
-from verl.workers.fsdp_workers import ActorRolloutRefWorker
+from verl.utils.config import omega_conf_to_dataclass
+from verl.trainer.main_ppo import _select_genrm_reward_model_worker
+from verl.workers.fsdp_workers import (
+    ActorRolloutRefWorker,
+    GenerativeRewardModelRolloutWorker,
+    GenerativeRewardModelWorker,
+    _build_genrm_actor_compat_config,
+    _build_genrm_rollout_config,
+)
 
 
 def test_actor_rollout_ref_worker_actor_ref_model():
@@ -75,3 +85,267 @@ def test_actor_rollout_ref_worker_actor_ref_model():
 
     model_config = actor_rollout_ref_worker.ref_module_fsdp._fsdp_wrapped_module.config
     assert model_config.hidden_size == 896
+
+
+def test_genrm_actor_compat_config_prefers_reward_model_fsdp_config():
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {
+                "path": "/tmp/reward-model",
+                "input_tokenizer": "/tmp/policy-tokenizer",
+                "fsdp_config": {"strategy": "fsdp2", "fsdp_size": 4, "forward_prefetch": True},
+            },
+            "rollout": {"name": "sglang", "tensor_model_parallel_size": 1},
+        }
+    )
+    actor_config = OmegaConf.create(
+        {
+            "actor": {
+                "strategy": "fsdp",
+                "ppo_micro_batch_size_per_gpu": 64,
+                "profiler": {"tool": "torch_memory"},
+                "fsdp_config": {"strategy": "fsdp", "fsdp_size": 8},
+            }
+        }
+    )
+    original_config = OmegaConf.to_container(config, resolve=False)
+    original_actor_config = OmegaConf.to_container(actor_config, resolve=False)
+
+    merged_cfg = _build_genrm_actor_compat_config(config, actor_config=actor_config)
+
+    assert merged_cfg.actor.strategy == "fsdp2"
+    assert merged_cfg.actor.fsdp_config.strategy == "fsdp2"
+    assert merged_cfg.actor.fsdp_config.fsdp_size == 4
+    assert merged_cfg.actor.fsdp_config.forward_prefetch is True
+    assert merged_cfg.actor.ppo_micro_batch_size_per_gpu == 1
+    assert merged_cfg.actor.profiler == {}
+    assert "model_config" not in merged_cfg.actor
+    assert "fsdp_config" not in merged_cfg.model
+    assert "input_tokenizer" not in merged_cfg.model
+
+    assert OmegaConf.to_container(config, resolve=False) == original_config
+    assert OmegaConf.to_container(actor_config, resolve=False) == original_actor_config
+
+
+def test_genrm_actor_compat_config_uses_actor_fsdp_as_fallback_only():
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {"path": "/tmp/reward-model", "input_tokenizer": None},
+            "rollout": {"name": "sglang"},
+        }
+    )
+    actor_config = OmegaConf.create(
+        {
+            "actor": {
+                "strategy": "fsdp",
+                "ppo_micro_batch_size_per_gpu": 64,
+                "profiler": {"tool": "torch_memory"},
+                "fsdp_config": {"strategy": "fsdp", "fsdp_size": 2, "param_offload": True},
+            }
+        }
+    )
+
+    merged_cfg = _build_genrm_actor_compat_config(config, actor_config=actor_config)
+
+    assert merged_cfg.actor.strategy == "fsdp"
+    assert merged_cfg.actor.fsdp_config.strategy == "fsdp"
+    assert merged_cfg.actor.fsdp_config.fsdp_size == 2
+    assert merged_cfg.actor.fsdp_config.param_offload is True
+    assert merged_cfg.actor.ppo_micro_batch_size_per_gpu == 1
+    assert merged_cfg.actor.profiler == {}
+
+
+def test_genrm_actor_compat_config_defaults_to_fsdp2_dataclass_config():
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {"path": "/tmp/reward-model", "input_tokenizer": None},
+            "rollout": {"name": "sglang"},
+        }
+    )
+
+    merged_cfg = _build_genrm_actor_compat_config(config)
+    actor_cfg = omega_conf_to_dataclass(merged_cfg.actor)
+
+    assert merged_cfg.actor.strategy == "fsdp2"
+    assert merged_cfg.actor.fsdp_config.strategy == "fsdp2"
+    assert merged_cfg.actor.fsdp_config.fsdp_size == -1
+    assert actor_cfg.strategy == "fsdp2"
+    assert actor_cfg.fsdp_config.strategy == "fsdp2"
+    assert actor_cfg.fsdp_config.fsdp_size == -1
+
+
+def test_genrm_worker_bootstraps_hybrid_rollout_without_loading_model(monkeypatch):
+    captured = {}
+
+    def fake_actor_rollout_ref_init(self, config, role, **kwargs):
+        captured["config"] = config
+        captured["role"] = role
+        captured["kwargs"] = kwargs
+
+    def fake_init_tokenizer_processor(self, tokenizer_path, input_tokenizer_path=None):
+        captured["tokenizer_path"] = tokenizer_path
+        captured["input_tokenizer_path"] = input_tokenizer_path
+
+    monkeypatch.setattr(ActorRolloutRefWorker, "__init__", fake_actor_rollout_ref_init)
+    monkeypatch.setattr(GenerativeRewardModelWorker, "init_tokenizer_processor", fake_init_tokenizer_processor)
+
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {
+                "path": "/tmp/reward-model",
+                "input_tokenizer": "/tmp/policy-tokenizer",
+                "fsdp_config": {"strategy": "fsdp2", "fsdp_size": 1},
+            },
+            "rollout": {"name": "sglang", "tensor_model_parallel_size": 1},
+        }
+    )
+
+    GenerativeRewardModelWorker(config)
+
+    assert captured["role"] == "actor_rollout"
+    assert captured["kwargs"]["disable_optim"] is True
+    assert captured["config"].actor.ppo_micro_batch_size_per_gpu == 1
+    assert captured["config"].actor.fsdp_config.fsdp_size == 1
+    assert "fsdp_config" not in captured["config"].model
+    assert "input_tokenizer" not in captured["config"].model
+    assert captured["tokenizer_path"] == "/tmp/reward-model"
+    assert captured["input_tokenizer_path"] == "/tmp/policy-tokenizer"
+
+
+def test_genrm_rollout_config_loads_static_weights_from_model_path():
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {
+                "path": "/tmp/reward-model",
+                "input_tokenizer": "/tmp/policy-tokenizer",
+                "fsdp_config": {"strategy": "fsdp2", "fsdp_size": 1},
+            },
+            "rollout": {"name": "sglang", "load_format": "dummy"},
+        }
+    )
+
+    merged_cfg = _build_genrm_rollout_config(config)
+
+    assert merged_cfg.rollout.load_format == "auto"
+    assert "fsdp_config" not in merged_cfg.model
+    assert "input_tokenizer" not in merged_cfg.model
+    assert OmegaConf.select(config, "model.input_tokenizer") == "/tmp/policy-tokenizer"
+    assert OmegaConf.select(config, "rollout.load_format") == "dummy"
+
+
+def test_genrm_worker_selection_defaults_to_hybrid_and_supports_rollout():
+    config = OmegaConf.create({"reward_model": {"strategy": "GenRM"}})
+    assert _select_genrm_reward_model_worker(config) is GenerativeRewardModelWorker
+
+    config.reward_model.genrm_engine_mode = "hybrid"
+    assert _select_genrm_reward_model_worker(config) is GenerativeRewardModelWorker
+
+    config.reward_model.genrm_engine_mode = "rollout"
+    assert _select_genrm_reward_model_worker(config) is GenerativeRewardModelRolloutWorker
+
+
+def test_genrm_rollout_worker_bootstraps_without_fsdp_actor(monkeypatch):
+    captured = {}
+
+    def fake_worker_init(self):
+        self._rank = 0
+        self._world_size = 1
+        self._local_rank = 0
+        self._local_world_size = 1
+        self._master_addr = "127.0.0.1"
+        self._master_port = "8888"
+        self.fused_worker_dict = {}
+        self._Worker__dispatch_dp_rank = {}
+        self._Worker__collect_dp_rank = {}
+
+    def fake_profiler_init(self, profiler):
+        captured["profiler"] = profiler
+
+    def fake_init_tokenizer_processor(self, tokenizer_path, input_tokenizer_path=None):
+        captured["tokenizer_path"] = tokenizer_path
+        captured["input_tokenizer_path"] = input_tokenizer_path
+
+    monkeypatch.setattr("verl.single_controller.base.Worker.__init__", fake_worker_init)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("verl.utils.profiler.DistProfilerExtension.__init__", fake_profiler_init)
+    monkeypatch.setattr(
+        GenerativeRewardModelRolloutWorker, "init_tokenizer_processor", fake_init_tokenizer_processor
+    )
+
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {
+                "path": "/tmp/reward-model",
+                "input_tokenizer": "/tmp/policy-tokenizer",
+                "fsdp_config": {"strategy": "fsdp2", "fsdp_size": 1},
+            },
+            "rollout": {"name": "sglang", "load_format": "dummy"},
+        }
+    )
+
+    worker = GenerativeRewardModelRolloutWorker(config, actor_config=OmegaConf.create({"actor": {"unused": True}}))
+
+    assert worker.config.rollout.load_format == "auto"
+    assert "fsdp_config" not in worker.config.model
+    assert "input_tokenizer" not in worker.config.model
+    assert not hasattr(worker, "actor_module_fsdp")
+    assert not hasattr(worker, "actor")
+    assert captured["tokenizer_path"] == "/tmp/reward-model"
+    assert captured["input_tokenizer_path"] == "/tmp/policy-tokenizer"
+
+
+def test_genrm_rollout_worker_compute_score_uses_rollout_engine_directly(monkeypatch):
+    class FakeData:
+        def __init__(self):
+            self.meta_info = {}
+
+        def to(self, device):
+            return self
+
+    class FakeProcessor:
+        def __init__(self):
+            self.generate_fn = None
+
+        def compute_scores(self, data, generate_fn):
+            self.generate_fn = generate_fn
+            return torch.tensor([1.0])
+
+    class FakeRollout:
+        def __init__(self):
+            self.release_calls = 0
+
+        def generate_for_rm(self, prompts):
+            return ["ok"]
+
+        async def release(self):
+            self.release_calls += 1
+
+    worker = object.__new__(GenerativeRewardModelRolloutWorker)
+    worker.config = OmegaConf.create({"rollout": {"free_cache_engine": True}})
+    worker.generation_config = None
+    worker.tokenizer = SimpleNamespace(eos_token_id=1, pad_token_id=0)
+    worker.rollout = FakeRollout()
+    worker.custom_processor = FakeProcessor()
+    worker._rollout_released = False
+
+    monkeypatch.setattr("verl.workers.fsdp_workers.get_device_id", lambda: 0)
+    monkeypatch.setattr("verl.workers.fsdp_workers.get_torch_device", lambda: SimpleNamespace(empty_cache=lambda: None))
+    monkeypatch.setattr(
+        GenerativeRewardModelRolloutWorker,
+        "_expand_to_token_level",
+        lambda self, data, scores: torch.zeros((1, 2)),
+    )
+
+    output = worker.compute_rm_score(FakeData())
+
+    assert worker.custom_processor.generate_fn.__self__ is worker.rollout
+    assert worker.custom_processor.generate_fn.__func__ is worker.rollout.generate_for_rm.__func__
+    assert worker.rollout.release_calls == 1
+    assert worker._rollout_released is True
+    assert "rm_scores" in output.batch
