@@ -805,6 +805,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_actor:
             actor_cfg = omega_conf_to_dataclass(self.config.actor)
+            if self.config.get("distillation", None) is not None:
+                actor_cfg.distillation = omega_conf_to_dataclass(self.config.distillation)
             self.actor = DataParallelPPOActor(
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
             )

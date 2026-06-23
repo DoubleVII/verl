@@ -27,6 +27,7 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
+from verl.trainer.distillation.losses import is_distillation_enabled, validate_distillation_config
 from verl.utils.config import validate_config
 from verl.utils.device import is_cuda_available
 from verl.utils.import_utils import load_extern_type
@@ -255,9 +256,32 @@ class TaskRunner:
         """Add reference policy worker if KL loss or KL reward is used."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+        use_ref_as_teacher = (
+            is_distillation_enabled(config.get("distillation"))
+            and config.distillation.teacher.source == "ref_policy"
+        )
+        if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss or use_ref_as_teacher:
             self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
             self.mapping[Role.RefPolicy] = "global_pool"
+
+    def prepare_distillation_config(self, config):
+        """Validate OPD and wire ref-policy teacher aliases into actor_rollout_ref.ref."""
+        validate_distillation_config(config)
+        if not is_distillation_enabled(config.get("distillation")):
+            return
+        if config.distillation.teacher.source != "ref_policy":
+            return
+
+        ref_model_path = config.distillation.teacher.get("ref_model_path", None)
+        if ref_model_path is None:
+            return
+
+        from omegaconf import open_dict
+
+        with open_dict(config.actor_rollout_ref.ref):
+            if config.actor_rollout_ref.ref.get("model", None) is None:
+                config.actor_rollout_ref.ref.model = {}
+            config.actor_rollout_ref.ref.model["path"] = ref_model_path
 
     def run(self, config):
         """Execute the main PPO training workflow.
@@ -279,6 +303,7 @@ class TaskRunner:
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
+        self.prepare_distillation_config(config)
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)

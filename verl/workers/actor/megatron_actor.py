@@ -37,6 +37,11 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from verl import DataProto
+from verl.trainer.distillation.losses import (
+    combine_policy_and_distillation_loss,
+    compute_sampled_distillation_loss,
+    is_distillation_enabled,
+)
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
@@ -130,6 +135,8 @@ class MegatronPPOActor(BasePPOActor):
         else:
             self.prof = None
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
+        self.distillation_config = self.config.get("distillation", None)
+        self.distillation_enabled = is_distillation_enabled(self.distillation_config)
         if self.use_fused_kernels:
             from verl.models.mcore.model_forward_fused import patch_fused_forward
 
@@ -316,6 +323,8 @@ class MegatronPPOActor(BasePPOActor):
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
+        if self.distillation_enabled:
+            select_keys.append("teacher_logprobs")
         # Include pre-computed IS weights if present in batch
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
@@ -487,6 +496,23 @@ class MegatronPPOActor(BasePPOActor):
                     policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                     metrics["actor/kl_loss"] = kl_loss.detach().item()
                     metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                if self.distillation_enabled:
+                    distillation_loss, distillation_metrics = compute_sampled_distillation_loss(
+                        config=self.config,
+                        distillation_config=self.distillation_config,
+                        log_prob=log_prob,
+                        teacher_logprobs=data["teacher_logprobs"],
+                        response_mask=response_mask,
+                        old_log_prob=data.get("old_log_probs", None),
+                        rollout_is_weights=data.get("rollout_is_weights", None),
+                    )
+                    policy_loss = combine_policy_and_distillation_loss(
+                        policy_loss=policy_loss,
+                        distillation_loss=distillation_loss,
+                        distillation_config=self.distillation_config,
+                    )
+                    metrics.update({f"actor/{name}": value for name, value in distillation_metrics.items()})
 
                 # return loss and stats
 

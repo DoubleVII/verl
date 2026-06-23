@@ -490,6 +490,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         if self._is_actor:
             actor_cfg = omega_conf_to_dataclass(self.config.actor)
+            if self.config.get("distillation", None) is not None:
+                actor_cfg.distillation = omega_conf_to_dataclass(self.config.distillation)
             self.actor = MegatronPPOActor(
                 config=actor_cfg,
                 model_config=self.actor_model_config,

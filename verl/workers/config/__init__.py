@@ -19,7 +19,8 @@ from .engine import *  # noqa
 from .optimizer import *  # noqa
 from .rollout import *  # noqa
 from .model import *  # noqa
-from . import actor, critic, reward_model, engine, optimizer, rollout, model
+from .distillation import *  # noqa
+from . import actor, critic, reward_model, engine, optimizer, rollout, model, distillation
 
 __all__ = (
     actor.__all__
@@ -29,4 +30,5 @@ __all__ = (
     + optimizer.__all__
     + rollout.__all__
     + model.__all__
+    + distillation.__all__
 )

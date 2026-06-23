@@ -27,6 +27,11 @@ from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
+from verl.trainer.distillation.losses import (
+    combine_policy_and_distillation_loss,
+    compute_sampled_distillation_loss,
+    is_distillation_enabled,
+)
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty, compute_policy_sft_loss
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
@@ -82,6 +87,8 @@ class DataParallelPPOActor(BasePPOActor):
             else entropy_from_logits
         )
         self.device_name = get_device_name()
+        self.distillation_config = self.config.get("distillation", None)
+        self.distillation_enabled = is_distillation_enabled(self.distillation_config)
 
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
@@ -373,6 +380,8 @@ class DataParallelPPOActor(BasePPOActor):
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
+        if self.distillation_enabled:
+            select_keys.append("teacher_logprobs")
         # Include pre-computed IS weights if present in batch
         # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
         if "rollout_is_weights" in data.batch.keys():
@@ -495,6 +504,24 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    if self.distillation_enabled:
+                        distillation_loss, distillation_metrics = compute_sampled_distillation_loss(
+                            config=self.config,
+                            distillation_config=self.distillation_config,
+                            log_prob=log_prob,
+                            teacher_logprobs=model_inputs["teacher_logprobs"],
+                            response_mask=response_mask,
+                            old_log_prob=old_log_prob,
+                            rollout_is_weights=rollout_is_weights,
+                        )
+                        policy_loss = combine_policy_and_distillation_loss(
+                            policy_loss=policy_loss,
+                            distillation_loss=distillation_loss,
+                            distillation_config=self.distillation_config,
+                        )
+                        for name, value in distillation_metrics.items():
+                            micro_batch_metrics[f"actor/{name}"] = value * loss_scale_factor
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz

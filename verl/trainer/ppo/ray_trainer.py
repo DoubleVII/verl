@@ -52,6 +52,7 @@ from verl.trainer.ppo.metric_utils import (
 from verl.trainer.ppo.mismatch_helper import compute_rollout_importance_weights
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -322,6 +323,14 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.role_worker_mapping)
+        self.use_ppo_reference_policy = self.config.algorithm.use_kl_in_reward or self.config.actor_rollout_ref.actor.use_kl_loss
+        self.use_distillation = is_distillation_enabled(self.config.get("distillation"))
+        self.distillation_teacher_source = (
+            self.config.distillation.teacher.source if self.use_distillation else None
+        )
+        if self.use_distillation:
+            with open_dict(self.config.actor_rollout_ref):
+                self.config.actor_rollout_ref.distillation = self.config.distillation
         self.use_rm = need_reward_model(self.role_worker_mapping)
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -777,7 +786,11 @@ class RayPPOTrainer:
             self.critic_wg = all_wg[str(Role.Critic)]
             self.critic_wg.init_model()
 
-        if self.use_reference_policy and not self.ref_in_actor:
+        use_standalone_ref_policy = self.use_reference_policy and (
+            not self.ref_in_actor
+            or (self.use_distillation and self.distillation_teacher_source == "ref_policy")
+        )
+        if use_standalone_ref_policy:
             self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
             self.ref_policy_wg.init_model()
 
@@ -1272,7 +1285,10 @@ class RayPPOTrainer:
 
                             metrics.update(calculate_debug_metrics(batch))
 
-                    if self.use_reference_policy:
+                    if self.use_distillation and self.distillation_teacher_source == "current_policy":
+                        batch.batch["teacher_logprobs"] = batch.batch["old_log_probs"].clone()
+
+                    if self.use_ppo_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             if not self.ref_in_actor:
@@ -1280,6 +1296,12 @@ class RayPPOTrainer:
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+
+                    if self.use_distillation and self.distillation_teacher_source == "ref_policy":
+                        with marked_timer("distillation_teacher", timing_raw, color="olive"):
+                            teacher_logprobs = self.ref_policy_wg.compute_ref_log_prob(batch)
+                            teacher_logprobs.batch["teacher_logprobs"] = teacher_logprobs.batch.pop("ref_log_prob")
+                            batch = batch.union(teacher_logprobs)
 
                     # compute values
                     if self.use_critic:

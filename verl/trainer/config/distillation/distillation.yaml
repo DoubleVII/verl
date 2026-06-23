@@ -1,0 +1,29 @@
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.DistillationConfig
+
+defaults:
+  - _self_
+
+# Whether to enable on-policy distillation.
+enabled: false
+
+# Teacher logits provider. ref_policy reuses actor_rollout_ref.ref in the same Ray cluster.
+teacher:
+  _target_: verl.workers.config.DistillationTeacherConfig
+  source: ref_policy
+  ref_model_path: null
+
+# Sampled-token distillation loss config. forward_kl_topk is intentionally deferred.
+distillation_loss:
+  _target_: verl.workers.config.DistillationLossConfig
+  loss_mode: k3
+  topk: 32
+  use_task_rewards: true
+  distillation_loss_coef: 1.0
+  loss_max_clamp: null
+  log_prob_min_clamp: null
+  use_policy_gradient: false
+  policy_loss_mode: vanilla
+  clip_ratio: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_high: 0.2
