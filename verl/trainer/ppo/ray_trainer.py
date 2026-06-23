@@ -52,7 +52,7 @@ from verl.trainer.ppo.metric_utils import (
 from verl.trainer.ppo.mismatch_helper import compute_rollout_importance_weights
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
-from verl.trainer.distillation.losses import is_distillation_enabled
+from verl.trainer.distillation.losses import is_distillation_enabled, is_forward_kl_topk_enabled
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -328,6 +328,7 @@ class RayPPOTrainer:
         self.distillation_teacher_source = (
             self.config.distillation.teacher.source if self.use_distillation else None
         )
+        self.distillation_forward_kl_topk = is_forward_kl_topk_enabled(self.config.get("distillation"))
         if self.use_distillation:
             with open_dict(self.config.actor_rollout_ref):
                 self.config.actor_rollout_ref.distillation = self.config.distillation
@@ -1285,7 +1286,11 @@ class RayPPOTrainer:
 
                             metrics.update(calculate_debug_metrics(batch))
 
-                    if self.use_distillation and self.distillation_teacher_source == "current_policy":
+                    if (
+                        self.use_distillation
+                        and self.distillation_teacher_source == "current_policy"
+                        and not self.distillation_forward_kl_topk
+                    ):
                         batch.batch["teacher_logprobs"] = batch.batch["old_log_probs"].clone()
 
                     if self.use_ppo_reference_policy:
@@ -1300,7 +1305,10 @@ class RayPPOTrainer:
                     if self.use_distillation and self.distillation_teacher_source == "ref_policy":
                         with marked_timer("distillation_teacher", timing_raw, color="olive"):
                             teacher_logprobs = self.ref_policy_wg.compute_ref_log_prob(batch)
-                            teacher_logprobs.batch["teacher_logprobs"] = teacher_logprobs.batch.pop("ref_log_prob")
+                            if not self.distillation_forward_kl_topk:
+                                teacher_logprobs.batch["teacher_logprobs"] = teacher_logprobs.batch.pop("ref_log_prob")
+                            elif "ref_log_prob" in teacher_logprobs.batch:
+                                teacher_logprobs.batch.pop("ref_log_prob")
                             batch = batch.union(teacher_logprobs)
 
                     # compute values

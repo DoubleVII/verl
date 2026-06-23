@@ -40,6 +40,7 @@ from verl import DataProto
 from verl.trainer.distillation.losses import (
     combine_policy_and_distillation_loss,
     compute_sampled_distillation_loss,
+    is_forward_kl_topk_enabled,
     is_distillation_enabled,
 )
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
@@ -137,6 +138,9 @@ class MegatronPPOActor(BasePPOActor):
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
         self.distillation_config = self.config.get("distillation", None)
         self.distillation_enabled = is_distillation_enabled(self.distillation_config)
+        self.distillation_forward_kl_topk_enabled = is_forward_kl_topk_enabled(self.distillation_config)
+        if self.distillation_forward_kl_topk_enabled:
+            raise NotImplementedError("distillation loss_mode=forward_kl_topk is implemented for FSDP only.")
         if self.use_fused_kernels:
             from verl.models.mcore.model_forward_fused import patch_fused_forward
 

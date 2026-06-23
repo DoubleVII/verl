@@ -43,7 +43,7 @@ class DistillationTeacherConfig(BaseConfig):
 
 @dataclass
 class DistillationLossConfig(BaseConfig):
-    """Configuration for sampled-token on-policy distillation losses."""
+    """Configuration for on-policy distillation losses."""
 
     loss_mode: str = "k3"
     topk: Optional[int] = 32
@@ -56,21 +56,29 @@ class DistillationLossConfig(BaseConfig):
     clip_ratio: float = 0.2
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.2
+    topk_kl_mode: str = "forward"
+    norm_to_one_for_kl: bool = False
+    use_chunked_topk: bool = True
+    chunked_topk_chunk_size: int = 4096
     global_batch_info: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        if self.loss_mode == "forward_kl_topk":
-            raise NotImplementedError(
-                "distillation.distillation_loss.loss_mode=forward_kl_topk is not supported in this first OPD "
-                "implementation. Use sampled-token KL modes such as k3, low_var_kl, k1, kl, abs, mse, or k2."
-            )
-        supported = {"kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"}
+        supported = {"kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3", "forward_kl_topk"}
         if self.loss_mode not in supported:
             raise ValueError(f"Unsupported distillation loss_mode={self.loss_mode!r}. Supported modes: {sorted(supported)}")
+        if self.loss_mode == "forward_kl_topk" and self.topk is None:
+            raise ValueError("distillation.distillation_loss.topk must be set when loss_mode=forward_kl_topk.")
+        if self.topk_kl_mode not in {"forward", "reverse"}:
+            raise ValueError("distillation.distillation_loss.topk_kl_mode must be 'forward' or 'reverse'.")
         if self.policy_loss_mode != "vanilla":
             raise NotImplementedError(
                 "Only distillation.distillation_loss.policy_loss_mode=vanilla is supported when "
                 "use_policy_gradient=True."
+            )
+        if self.loss_mode == "forward_kl_topk" and self.use_policy_gradient:
+            raise NotImplementedError(
+                "distillation.distillation_loss.loss_mode=forward_kl_topk currently supports direct supervised "
+                "distillation only. Set use_policy_gradient=False."
             )
         if not self.use_policy_gradient and self.loss_mode == "k1":
             raise ValueError(
