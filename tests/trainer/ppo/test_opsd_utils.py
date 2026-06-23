@@ -82,6 +82,12 @@ def _batch(extra_info=None, teacher_prompt=None):
     return DataProto(batch=tensors, non_tensor_batch=non_tensors)
 
 
+def _batch_with_response_attention_mismatch(extra_info=None):
+    batch = _batch(extra_info=extra_info)
+    batch.batch["attention_mask"][:, -1] = 0
+    return batch
+
+
 def test_extracts_default_extra_info_teacher_prompt():
     sample = {"extra_info": {"teacher_prompt": "full teacher prompt"}}
 
@@ -114,6 +120,20 @@ def test_build_teacher_batch_preserves_responses_and_recomputes_masks():
     assert teacher_batch.batch["position_ids"].shape == teacher_batch.batch["input_ids"].shape
     assert torch.all(teacher_batch.batch["attention_mask"][:, -2:] == 1)
     assert tokenizer.texts == ["Full teacher prompt A", "Full teacher prompt B"]
+
+
+def test_build_teacher_batch_uses_response_mask_for_response_attention():
+    batch = _batch_with_response_attention_mismatch(
+        extra_info=[
+            {"teacher_prompt": "Full teacher prompt A"},
+            {"teacher_prompt": "Full teacher prompt B"},
+        ]
+    )
+
+    attach_opsd_metadata(batch, _config())
+    teacher_batch = build_opsd_teacher_batch(batch, FakeTokenizer(), _config())
+
+    assert torch.equal(teacher_batch.batch["attention_mask"][:, -2:], batch.batch["response_mask"])
 
 
 def test_build_teacher_batch_renders_chat_list_prompts():
