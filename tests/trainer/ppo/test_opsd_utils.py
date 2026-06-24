@@ -9,6 +9,7 @@ from tensordict import TensorDict
 from verl import DataProto
 from verl.interactions.gqm_post_edit_interaction import GQM_POST_EDIT_PROMPT
 from verl.trainer.ppo.opsd_utils import (
+    DISTILLATION_LOSS_MASK_KEY,
     REWARD_MODEL_PROMPTS_KEY,
     REWARD_MODEL_RESPONSES_KEY,
     OPSD_TEACHER_PROMPT_KEY,
@@ -176,6 +177,25 @@ def test_build_reward_model_teacher_batch_uses_online_gqm_outputs():
     assert "GQM analysis A" in tokenizer.texts[0]
     assert GQM_POST_EDIT_PROMPT in tokenizer.texts[0]
     assert tokenizer.texts[0].endswith("Assistant:")
+    assert torch.equal(teacher_batch.batch[DISTILLATION_LOSS_MASK_KEY], torch.ones(2, 1, dtype=torch.long))
+    assert teacher_batch.meta_info["distillation_loss_mask_valid_ratio"] == 1.0
+
+
+def test_build_reward_model_teacher_batch_masks_missing_reward_model_outputs():
+    batch = _batch()
+    batch.non_tensor_batch[REWARD_MODEL_PROMPTS_KEY] = np.array(
+        [{"prompt_token_ids": [1, 2, 3]}, {"prompt_token_ids": [4, 5, 6]}], dtype=object
+    )
+    batch.non_tensor_batch[REWARD_MODEL_RESPONSES_KEY] = np.array(
+        ["GQM analysis A\nScore: 80", ""], dtype=object
+    )
+    tokenizer = FakeTokenizer()
+
+    teacher_batch = build_reward_model_teacher_batch(batch, tokenizer, _config())
+
+    assert torch.equal(teacher_batch.batch["responses"], batch.batch["responses"])
+    assert torch.equal(teacher_batch.batch[DISTILLATION_LOSS_MASK_KEY], torch.tensor([[1], [0]]))
+    assert teacher_batch.meta_info["distillation_loss_mask_valid_ratio"] == 0.5
 
 
 def test_get_gen_batch_keeps_opsd_metadata_on_training_batch():

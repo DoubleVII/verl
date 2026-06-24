@@ -36,6 +36,7 @@ from verl.trainer.distillation.losses import (
     is_forward_kl_topk_enabled,
     is_distillation_enabled,
 )
+from verl.trainer.ppo.opsd_utils import DISTILLATION_LOSS_MASK_KEY
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty, compute_policy_sft_loss
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
@@ -216,6 +217,10 @@ class DataParallelPPOActor(BasePPOActor):
                             )
                         if compute_distillation_topk:
                             response_mask = micro_batch["response_mask"].to(device=attention_mask.device, dtype=torch.bool)
+                            if DISTILLATION_LOSS_MASK_KEY in micro_batch:
+                                response_mask = response_mask & micro_batch[DISTILLATION_LOSS_MASK_KEY].to(
+                                    device=attention_mask.device, dtype=torch.bool
+                                )
                         else:
                             response_mask = attention_mask[:, -response_length:].to(torch.bool)
                         response_mask_full = torch.zeros(
@@ -256,6 +261,7 @@ class DataParallelPPOActor(BasePPOActor):
                                 teacher_logprobs=micro_batch["teacher_logprobs"],
                                 teacher_ids=micro_batch["teacher_ids"],
                                 response_mask=micro_batch["response_mask"],
+                                distillation_loss_mask=micro_batch.get(DISTILLATION_LOSS_MASK_KEY, None),
                             )
                             aux_outputs["distillation_loss"] = distillation_loss
                             aux_outputs["distillation_metrics"] = distillation_metrics
@@ -350,6 +356,7 @@ class DataParallelPPOActor(BasePPOActor):
                             teacher_logprobs=micro_batch["teacher_logprobs"],
                             teacher_ids=micro_batch["teacher_ids"],
                             response_mask=micro_batch["response_mask"],
+                            distillation_loss_mask=micro_batch.get(DISTILLATION_LOSS_MASK_KEY, None),
                         )
                         aux_outputs["distillation_loss"] = distillation_loss
                         aux_outputs["distillation_metrics"] = distillation_metrics
@@ -482,6 +489,8 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.append("ref_log_prob")
         if self.distillation_enabled:
             select_keys.append("teacher_logprobs")
+            if DISTILLATION_LOSS_MASK_KEY in data.batch.keys():
+                select_keys.append(DISTILLATION_LOSS_MASK_KEY)
         if self.distillation_forward_kl_topk_enabled:
             select_keys.append("teacher_ids")
         # Include pre-computed IS weights if present in batch
@@ -627,6 +636,7 @@ class DataParallelPPOActor(BasePPOActor):
                             log_prob=log_prob,
                             teacher_logprobs=model_inputs["teacher_logprobs"],
                             response_mask=response_mask,
+                            distillation_loss_mask=model_inputs.get(DISTILLATION_LOSS_MASK_KEY, None),
                             old_log_prob=old_log_prob,
                             rollout_is_weights=rollout_is_weights,
                         )

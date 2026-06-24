@@ -15,6 +15,7 @@ from verl.utils.torch_functional import postprocess_data
 OPSD_TEACHER_PROMPT_KEY = "opsd_teacher_prompt"
 REWARD_MODEL_PROMPTS_KEY = "reward_model_prompts"
 REWARD_MODEL_RESPONSES_KEY = "reward_model_responses"
+DISTILLATION_LOSS_MASK_KEY = "distillation_loss_mask"
 
 
 def distillation_uses_data_teacher_prompt(config: Any) -> bool:
@@ -73,24 +74,49 @@ def build_reward_model_teacher_batch(batch: DataProto, tokenizer: Any, config: A
 
     constructor = _load_reward_model_prompt_constructor(config)
     constructor_kwargs = dict(_select(config, "distillation.teacher.prompt_constructor_kwargs", {}) or {})
-    teacher_prompts = [
-        constructor(
-            prompt=reward_model_prompt,
-            response=reward_model_response,
-            tokenizer=tokenizer,
-            sample=_sample_dict_from_dataproto(batch, index),
-            config=config,
-            **constructor_kwargs,
+    teacher_prompts = []
+    distillation_loss_mask = []
+    for index, (reward_model_prompt, reward_model_response) in enumerate(
+        zip(
+            batch.non_tensor_batch[REWARD_MODEL_PROMPTS_KEY],
+            batch.non_tensor_batch[REWARD_MODEL_RESPONSES_KEY],
+            strict=True,
         )
-        for index, (reward_model_prompt, reward_model_response) in enumerate(
-            zip(
-                batch.non_tensor_batch[REWARD_MODEL_PROMPTS_KEY],
-                batch.non_tensor_batch[REWARD_MODEL_RESPONSES_KEY],
-                strict=True,
+    ):
+        try:
+            teacher_prompt = constructor(
+                prompt=reward_model_prompt,
+                response=reward_model_response,
+                tokenizer=tokenizer,
+                sample=_sample_dict_from_dataproto(batch, index),
+                config=config,
+                **constructor_kwargs,
             )
-        )
-    ]
-    return _build_teacher_batch_from_prompts(batch, tokenizer, config, teacher_prompts)
+            distillation_loss_mask.append(1)
+        except ValueError:
+            teacher_prompt = _actor_prompt_from_batch(batch, tokenizer, index)
+            distillation_loss_mask.append(0)
+        teacher_prompts.append(teacher_prompt)
+
+    teacher_batch = _build_teacher_batch_from_prompts(batch, tokenizer, config, teacher_prompts)
+    teacher_batch.batch[DISTILLATION_LOSS_MASK_KEY] = torch.tensor(
+        distillation_loss_mask,
+        dtype=teacher_batch.batch["response_mask"].dtype,
+        device=teacher_batch.batch["response_mask"].device,
+    ).unsqueeze(-1)
+    teacher_batch.meta_info["distillation_loss_mask_valid_ratio"] = (
+        float(sum(distillation_loss_mask)) / len(distillation_loss_mask) if distillation_loss_mask else 0.0
+    )
+    return teacher_batch
+
+
+def _actor_prompt_from_batch(batch: DataProto, tokenizer: Any, index: int) -> str:
+    prompt_ids = batch.batch["prompts"][index]
+    prompt_attention_mask = batch.batch["attention_mask"][index, : prompt_ids.shape[-1]].to(bool)
+    return tokenizer.decode(
+        prompt_ids[prompt_attention_mask].detach().cpu().tolist(),
+        skip_special_tokens=False,
+    )
 
 
 def _sample_dict_from_dataproto(batch: DataProto, index: int) -> dict[str, Any]:

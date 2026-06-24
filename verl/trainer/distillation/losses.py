@@ -101,12 +101,15 @@ def compute_sampled_distillation_loss(
     log_prob: torch.Tensor,
     teacher_logprobs: torch.Tensor,
     response_mask: torch.Tensor,
+    distillation_loss_mask: Optional[torch.Tensor] = None,
     old_log_prob: Optional[torch.Tensor] = None,
     rollout_is_weights: Optional[torch.Tensor] = None,
 ):
     """Compute sampled-token OPD loss and metrics for padded tensors."""
     loss_config = distillation_config.distillation_loss
     response_mask = response_mask.to(bool)
+    if distillation_loss_mask is not None:
+        response_mask = response_mask & distillation_loss_mask.to(device=response_mask.device, dtype=torch.bool)
     teacher_logprobs = teacher_logprobs.to(log_prob.device)
     if loss_config.log_prob_min_clamp is not None:
         teacher_logprobs = teacher_logprobs.clamp_min(loss_config.log_prob_min_clamp)
@@ -120,6 +123,15 @@ def compute_sampled_distillation_loss(
         kl_penalty=loss_config.loss_mode,
     )
     valid_losses = distillation_losses[response_mask]
+    if valid_losses.numel() == 0:
+        zero_loss = distillation_losses.sum() * 0.0
+        metrics = {
+            "distillation/abs_loss": zero_loss.detach().item(),
+            "distillation/loss_min": zero_loss.detach().item(),
+            "distillation/loss_max": zero_loss.detach().item(),
+            "distillation/loss": zero_loss.detach().item(),
+        }
+        return zero_loss, metrics
     metrics = {
         "distillation/abs_loss": valid_losses.abs().mean().detach().item(),
         "distillation/loss_min": valid_losses.min().detach().item(),
@@ -239,10 +251,13 @@ def compute_forward_kl_topk_distillation_loss(
     teacher_logprobs: torch.Tensor,
     teacher_ids: torch.Tensor,
     response_mask: torch.Tensor,
+    distillation_loss_mask: Optional[torch.Tensor] = None,
 ):
     """Compute FSDP top-k forward KL OPD loss for padded response tensors."""
     loss_config = distillation_config.distillation_loss
     response_mask = response_mask.to(bool)
+    if distillation_loss_mask is not None:
+        response_mask = response_mask & distillation_loss_mask.to(device=response_mask.device, dtype=torch.bool)
     teacher_logprobs = teacher_logprobs.to(student_logits.device)
     teacher_ids = teacher_ids.to(student_logits.device)
 
@@ -266,6 +281,16 @@ def compute_forward_kl_topk_distillation_loss(
     )
     distillation_losses = distillation_losses.clamp_min(0.0)
     valid_losses = distillation_losses[response_mask]
+    if valid_losses.numel() == 0:
+        zero_loss = distillation_losses.sum() * 0.0
+        metrics = {
+            "distillation/loss": zero_loss.detach().item(),
+            "distillation/loss_min": zero_loss.detach().item(),
+            "distillation/loss_max": zero_loss.detach().item(),
+            "distillation/student_mass": zero_loss.detach().item(),
+            "distillation/teacher_mass": zero_loss.detach().item(),
+        }
+        return zero_loss, metrics
 
     if loss_config.loss_max_clamp is not None:
         distillation_losses = distillation_losses.clamp(max=loss_config.loss_max_clamp)
@@ -298,10 +323,13 @@ def compute_forward_kl_topk_distillation_loss_flat(
     teacher_logprobs: torch.Tensor,
     teacher_ids: torch.Tensor,
     response_mask: torch.Tensor,
+    distillation_loss_mask: Optional[torch.Tensor] = None,
 ):
     """Compute top-k forward KL from flat valid response logits without building [B, T, V]."""
     loss_config = distillation_config.distillation_loss
     response_mask = response_mask.to(bool)
+    if distillation_loss_mask is not None:
+        response_mask = response_mask & distillation_loss_mask.to(device=response_mask.device, dtype=torch.bool)
     valid_teacher_logprobs = teacher_logprobs.to(student_logits.device)[response_mask]
     valid_teacher_ids = teacher_ids.to(student_logits.device)[response_mask]
     if student_logits.shape[0] != valid_teacher_ids.shape[0]:
@@ -330,6 +358,16 @@ def compute_forward_kl_topk_distillation_loss_flat(
         norm_to_one_for_kl=loss_config.norm_to_one_for_kl,
     )
     valid_losses = valid_losses.clamp_min(0.0)
+    if valid_losses.numel() == 0:
+        zero_loss = student_logits.sum() * 0.0
+        metrics = {
+            "distillation/loss": zero_loss.detach().item(),
+            "distillation/loss_min": zero_loss.detach().item(),
+            "distillation/loss_max": zero_loss.detach().item(),
+            "distillation/student_mass": zero_loss.detach().item(),
+            "distillation/teacher_mass": zero_loss.detach().item(),
+        }
+        return zero_loss, metrics
     if loss_config.loss_max_clamp is not None:
         valid_losses = valid_losses.clamp(max=loss_config.loss_max_clamp)
 

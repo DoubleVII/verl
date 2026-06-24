@@ -51,6 +51,7 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.mismatch_helper import compute_rollout_importance_weights
 from verl.trainer.ppo.opsd_utils import (
+    DISTILLATION_LOSS_MASK_KEY,
     OPSD_TEACHER_PROMPT_KEY,
     attach_opsd_metadata,
     build_opsd_teacher_batch,
@@ -1344,7 +1345,15 @@ class RayPPOTrainer:
                     if self.use_distillation and self.distillation_teacher_source == "reward_model":
                         with marked_timer("reward_model_distillation_teacher", timing_raw, color="olive"):
                             teacher_input_batch = build_reward_model_teacher_batch(batch, self.tokenizer, self.config)
+                            metrics["opsd/reward_model_valid_ratio"] = teacher_input_batch.meta_info.get(
+                                "distillation_loss_mask_valid_ratio", 1.0
+                            )
                             teacher_logprobs = self.rm_wg.compute_distillation_teacher_log_prob(teacher_input_batch)
+                            if DISTILLATION_LOSS_MASK_KEY in teacher_input_batch.batch:
+                                teacher_device = teacher_logprobs.batch["teacher_logprobs"].device
+                                teacher_logprobs.batch[DISTILLATION_LOSS_MASK_KEY] = teacher_input_batch.batch[
+                                    DISTILLATION_LOSS_MASK_KEY
+                                ].to(teacher_device)
                             batch = batch.union(teacher_logprobs)
                             metrics["opsd/reward_model"] = 1.0
 
