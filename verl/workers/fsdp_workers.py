@@ -1966,6 +1966,17 @@ def _build_genrm_actor_compat_config(
     A standalone rollout worker does not perform that sync before generation.
     """
 
+    def _drop_empty_targets(value):
+        if isinstance(value, dict):
+            return {
+                key: _drop_empty_targets(item)
+                for key, item in value.items()
+                if not (key == "_target_" and item == "")
+            }
+        if isinstance(value, list):
+            return [_drop_empty_targets(item) for item in value]
+        return value
+
     rollout_defaults = asdict(RolloutConfig())
     rollout_defaults.pop("profiler", None)
 
@@ -1993,18 +2004,25 @@ def _build_genrm_actor_compat_config(
         if actor_config is not None
         else 256
     )
-    actor_cfg = {
-        "_target_": "verl.workers.config.FSDPActorConfig",
-        "strategy": strategy,
-        "fsdp_config": OmegaConf.to_container(fsdp_cfg, resolve=False),
-        "ppo_mini_batch_size": ppo_mini_batch_size,
-        "ppo_micro_batch_size": None,
-        "ppo_micro_batch_size_per_gpu": 1,
-        "use_dynamic_bsz": True,
-        "ppo_max_token_len_per_gpu": ppo_max_token_len_per_gpu,
-        "ulysses_sequence_parallel_size": OmegaConf.select(config, "ulysses_sequence_parallel_size", default=1),
-        "profiler": {},
-    }
+    fsdp_cfg_dataclass = omega_conf_to_dataclass(fsdp_cfg, dataclass_type=FSDPEngineConfig)
+    actor_cfg = asdict(
+        FSDPActorConfig(
+            strategy=strategy,
+            fsdp_config=fsdp_cfg_dataclass,
+            ppo_mini_batch_size=ppo_mini_batch_size,
+            ppo_micro_batch_size=None,
+            ppo_micro_batch_size_per_gpu=1,
+            use_dynamic_bsz=True,
+            ppo_max_token_len_per_gpu=ppo_max_token_len_per_gpu,
+        )
+    )
+    actor_cfg = _drop_empty_targets(actor_cfg)
+    actor_cfg["_target_"] = "verl.workers.config.FSDPActorConfig"
+    actor_cfg["fsdp_config"] = OmegaConf.to_container(fsdp_cfg, resolve=False)
+    actor_cfg["ulysses_sequence_parallel_size"] = OmegaConf.select(
+        config, "ulysses_sequence_parallel_size", default=1
+    )
+    actor_cfg["profiler"] = {}
 
     config_without_actor = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     if "actor" in config_without_actor:
