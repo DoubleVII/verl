@@ -92,6 +92,7 @@ def build_reward_model_teacher_batch(batch: DataProto, tokenizer: Any, config: A
                 config=config,
                 **constructor_kwargs,
             )
+            teacher_prompt = _truncate_reward_model_teacher_prompt_if_needed(teacher_prompt, tokenizer, config)
             distillation_loss_mask.append(1)
         except ValueError:
             teacher_prompt = _actor_prompt_from_batch(batch, tokenizer, index)
@@ -108,6 +109,46 @@ def build_reward_model_teacher_batch(batch: DataProto, tokenizer: Any, config: A
         float(sum(distillation_loss_mask)) / len(distillation_loss_mask) if distillation_loss_mask else 0.0
     )
     return teacher_batch
+
+
+def _truncate_reward_model_teacher_prompt_if_needed(teacher_prompt: Any, tokenizer: Any, config: Any) -> Any:
+    max_length = _teacher_max_prompt_length(config)
+    if not isinstance(teacher_prompt, list) or len(teacher_prompt) < 3:
+        return teacher_prompt
+    if _prompt_token_length(teacher_prompt, tokenizer, config) <= max_length:
+        return teacher_prompt
+
+    assistant_index = _find_last_assistant_message_index(teacher_prompt)
+    if assistant_index is None:
+        return teacher_prompt
+
+    truncated_prompt = deepcopy(teacher_prompt)
+    assistant_message = dict(truncated_prompt[assistant_index])
+    response_text = str(assistant_message.get("content", ""))
+    response_ids = tokenizer([response_text], return_tensors="pt", padding=False, add_special_tokens=False)[
+        "input_ids"
+    ].squeeze(0)
+
+    low = 0
+    high = response_ids.numel()
+    best_content = ""
+    truncation = str(_select(config, "distillation.teacher.response_truncation", "middle"))
+    while low <= high:
+        keep = (low + high) // 2
+        candidate = dict(assistant_message)
+        candidate["content"] = _decode_truncated_ids(response_ids, keep, truncation, tokenizer)
+        truncated_prompt[assistant_index] = candidate
+        if _prompt_token_length(truncated_prompt, tokenizer, config) <= max_length:
+            best_content = candidate["content"]
+            low = keep + 1
+        else:
+            high = keep - 1
+
+    assistant_message["content"] = best_content
+    truncated_prompt[assistant_index] = assistant_message
+    if _prompt_token_length(truncated_prompt, tokenizer, config) > max_length:
+        raise ValueError("Reward model teacher prompt exceeds max_prompt_length after response truncation.")
+    return truncated_prompt
 
 
 def _actor_prompt_from_batch(batch: DataProto, tokenizer: Any, index: int) -> str:
@@ -139,6 +180,38 @@ def _render_teacher_prompt(teacher_prompt: Any, tokenizer: Any, apply_chat_templ
     return str(teacher_prompt)
 
 
+def _prompt_token_length(teacher_prompt: Any, tokenizer: Any, config: Any) -> int:
+    apply_chat_template_kwargs = _select(config, "data.apply_chat_template_kwargs", {}) or {}
+    prompt_text = _render_teacher_prompt(teacher_prompt, tokenizer, apply_chat_template_kwargs)
+    encoded = tokenizer([prompt_text], return_tensors="pt", padding=False, add_special_tokens=False)
+    return int(encoded["attention_mask"].sum().item())
+
+
+def _find_last_assistant_message_index(messages: list[Any]) -> int | None:
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return index
+    return None
+
+
+def _decode_truncated_ids(token_ids: torch.Tensor, keep: int, truncation: str, tokenizer: Any) -> str:
+    if keep <= 0:
+        return ""
+    keep = min(keep, token_ids.numel())
+    if truncation == "left":
+        kept_ids = token_ids[-keep:]
+    elif truncation == "right":
+        kept_ids = token_ids[:keep]
+    elif truncation == "middle":
+        left = keep // 2
+        right = keep - left
+        kept_ids = torch.cat([token_ids[:left], token_ids[-right:]], dim=0) if right else token_ids[:left]
+    else:
+        raise ValueError("distillation.teacher.response_truncation must be 'left', 'right', or 'middle'.")
+    return tokenizer.decode(kept_ids.detach().cpu().tolist(), skip_special_tokens=False)
+
+
 def _load_reward_model_prompt_constructor(config: Any):
     path = _select(config, "distillation.teacher.prompt_constructor_path", None)
     name = _select(config, "distillation.teacher.prompt_constructor_name", None)
@@ -165,7 +238,7 @@ def _build_teacher_batch_from_prompts(
     prompt_ids, prompt_attention_mask = _tokenize_and_left_pad_prompts(
         tokenizer=tokenizer,
         prompts=prompts,
-        max_length=int(_select(config, "data.max_prompt_length")),
+        max_length=_teacher_max_prompt_length(config),
         truncation=str(_select(config, "data.truncation", "error")),
     )
 
@@ -210,6 +283,16 @@ def _tokenize_and_left_pad_prompts(
         attention_mask.append(prompt_attention_mask.squeeze(0))
 
     return torch.stack(input_ids, dim=0), torch.stack(attention_mask, dim=0)
+
+
+def _teacher_max_prompt_length(config: Any) -> int:
+    return int(
+        _select(
+            config,
+            "distillation.teacher.max_prompt_length",
+            _select(config, "data.max_prompt_length"),
+        )
+    )
 
 
 def _has_prompt_value(value: Any) -> bool:

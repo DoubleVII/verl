@@ -28,6 +28,8 @@ class DistillationTeacherConfig(BaseConfig):
     ref_model_path: Optional[str] = None
     prompt_source: str = "actor_prompt"
     teacher_prompt_path: str = "extra_info.teacher_prompt"
+    max_prompt_length: Optional[int] = None
+    response_truncation: str = "middle"
     prompt_constructor_path: Optional[str] = None
     prompt_constructor_name: Optional[str] = None
     prompt_constructor_kwargs: dict = field(default_factory=dict)
@@ -43,6 +45,8 @@ class DistillationTeacherConfig(BaseConfig):
                 f"Unsupported distillation.teacher.prompt_source={self.prompt_source!r}. "
                 "Supported values are 'actor_prompt', 'data_teacher_prompt', and 'reward_model'."
             )
+        if self.response_truncation not in {"left", "right", "middle"}:
+            raise ValueError("distillation.teacher.response_truncation must be 'left', 'right', or 'middle'.")
 
 
 @dataclass

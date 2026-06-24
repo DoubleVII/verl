@@ -14,6 +14,11 @@ teacher:
   ref_model_path: null
   prompt_source: actor_prompt
   teacher_prompt_path: extra_info.teacher_prompt
+  # Optional max length for teacher prompts. Defaults to data.max_prompt_length when null.
+  max_prompt_length: null
+  # When reward-model teacher prompts exceed max_prompt_length, truncate the constructed
+  # assistant response segment first, preserving the reward prompt and final instruction.
+  response_truncation: middle
   prompt_constructor_path: null
   prompt_constructor_name: null
   prompt_constructor_kwargs: {}

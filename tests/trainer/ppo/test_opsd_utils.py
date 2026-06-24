@@ -35,7 +35,7 @@ class FakeTokenizer:
 
     def __call__(self, prompts, return_tensors="pt", padding=True, add_special_tokens=False):
         self.texts.extend(list(prompts))
-        encoded = [[ord(char) % 251 + 1 for char in prompt] for prompt in prompts]
+        encoded = [[ord(char) for char in prompt] for prompt in prompts]
         max_len = max(len(ids) for ids in encoded)
         input_ids = []
         attention_mask = []
@@ -49,11 +49,13 @@ class FakeTokenizer:
         }
 
     def decode(self, token_ids, skip_special_tokens=False):
-        return "Decoded original GQM prompt"
+        if token_ids == [1, 2, 3] or token_ids == [4, 5, 6]:
+            return "Decoded original GQM prompt"
+        return "".join(chr(token_id) for token_id in token_ids if token_id != self.pad_token_id)
 
 
-def _config(prompt_path="extra_info.teacher_prompt"):
-    return OmegaConf.create(
+def _config(prompt_path="extra_info.teacher_prompt", teacher_max_prompt_length=None):
+    config = OmegaConf.create(
         {
             "distillation": {
                 "teacher": {
@@ -70,6 +72,9 @@ def _config(prompt_path="extra_info.teacher_prompt"):
             },
         }
     )
+    if teacher_max_prompt_length is not None:
+        config.distillation.teacher.max_prompt_length = teacher_max_prompt_length
+    return config
 
 
 def _batch(extra_info=None, teacher_prompt=None):
@@ -167,11 +172,11 @@ def test_build_reward_model_teacher_batch_uses_online_gqm_outputs():
     )
     tokenizer = FakeTokenizer()
 
-    teacher_batch = build_reward_model_teacher_batch(batch, tokenizer, _config())
+    teacher_batch = build_reward_model_teacher_batch(batch, tokenizer, _config(teacher_max_prompt_length=512))
 
     assert torch.equal(teacher_batch.batch["responses"], batch.batch["responses"])
     assert torch.equal(teacher_batch.batch["response_mask"], batch.batch["response_mask"])
-    assert teacher_batch.batch["input_ids"].shape == (2, 66)
+    assert teacher_batch.batch["input_ids"].shape == (2, 514)
     assert torch.all(teacher_batch.batch["attention_mask"][:, -2:] == 1)
     assert "Decoded original GQM prompt" in tokenizer.texts[0]
     assert "GQM analysis A" in tokenizer.texts[0]
@@ -191,11 +196,31 @@ def test_build_reward_model_teacher_batch_masks_missing_reward_model_outputs():
     )
     tokenizer = FakeTokenizer()
 
-    teacher_batch = build_reward_model_teacher_batch(batch, tokenizer, _config())
+    teacher_batch = build_reward_model_teacher_batch(batch, tokenizer, _config(teacher_max_prompt_length=512))
 
     assert torch.equal(teacher_batch.batch["responses"], batch.batch["responses"])
     assert torch.equal(teacher_batch.batch[DISTILLATION_LOSS_MASK_KEY], torch.tensor([[1], [0]]))
     assert teacher_batch.meta_info["distillation_loss_mask_valid_ratio"] == 0.5
+
+
+def test_build_reward_model_teacher_batch_truncates_reward_model_response_first():
+    batch = _batch()
+    batch.non_tensor_batch[REWARD_MODEL_PROMPTS_KEY] = np.array(
+        [{"prompt_token_ids": [1, 2, 3]}, {"prompt_token_ids": [4, 5, 6]}], dtype=object
+    )
+    batch.non_tensor_batch[REWARD_MODEL_RESPONSES_KEY] = np.array(
+        ["GQM analysis A " + "x" * 200, "GQM analysis B " + "y" * 200], dtype=object
+    )
+    tokenizer = FakeTokenizer()
+    config = _config(teacher_max_prompt_length=320)
+
+    teacher_batch = build_reward_model_teacher_batch(batch, tokenizer, config)
+
+    assert teacher_batch.batch["prompts"].shape[-1] == 320
+    assert torch.equal(teacher_batch.batch[DISTILLATION_LOSS_MASK_KEY], torch.ones(2, 1, dtype=torch.long))
+    assert "Decoded original GQM prompt" in tokenizer.texts[-2]
+    assert GQM_POST_EDIT_PROMPT in tokenizer.texts[-2]
+    assert "x" * 200 not in tokenizer.texts[-2]
 
 
 def test_get_gen_batch_keeps_opsd_metadata_on_training_batch():
