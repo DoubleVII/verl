@@ -1983,12 +1983,18 @@ def _build_genrm_actor_compat_config(
         fsdp_cfg._target_ = "verl.workers.config.FSDPEngineConfig"
         fsdp_cfg.strategy = strategy
 
+    ppo_max_token_len_per_gpu = (
+        OmegaConf.select(actor_config, "actor.ppo_max_token_len_per_gpu", default=16384)
+        if actor_config is not None
+        else 16384
+    )
     actor_cfg = {
         "_target_": "verl.workers.config.FSDPActorConfig",
         "strategy": strategy,
         "fsdp_config": OmegaConf.to_container(fsdp_cfg, resolve=False),
         "ppo_micro_batch_size_per_gpu": 1,
         "use_dynamic_bsz": True,
+        "ppo_max_token_len_per_gpu": ppo_max_token_len_per_gpu,
         "ulysses_sequence_parallel_size": OmegaConf.select(config, "ulysses_sequence_parallel_size", default=1),
         "profiler": {},
     }
