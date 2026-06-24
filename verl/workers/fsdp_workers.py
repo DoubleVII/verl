@@ -1988,10 +1988,16 @@ def _build_genrm_actor_compat_config(
         if actor_config is not None
         else 16384
     )
+    ppo_mini_batch_size = (
+        OmegaConf.select(actor_config, "actor.ppo_mini_batch_size", default=256)
+        if actor_config is not None
+        else 256
+    )
     actor_cfg = {
         "_target_": "verl.workers.config.FSDPActorConfig",
         "strategy": strategy,
         "fsdp_config": OmegaConf.to_container(fsdp_cfg, resolve=False),
+        "ppo_mini_batch_size": ppo_mini_batch_size,
         "ppo_micro_batch_size_per_gpu": 1,
         "use_dynamic_bsz": True,
         "ppo_max_token_len_per_gpu": ppo_max_token_len_per_gpu,

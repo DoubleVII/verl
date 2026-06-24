@@ -104,6 +104,7 @@ def test_genrm_actor_compat_config_prefers_reward_model_fsdp_config():
         {
             "actor": {
                 "strategy": "fsdp",
+                "ppo_mini_batch_size": 128,
                 "ppo_micro_batch_size_per_gpu": 64,
                 "ppo_max_token_len_per_gpu": 24576,
                 "profiler": {"tool": "torch_memory"},
@@ -120,6 +121,7 @@ def test_genrm_actor_compat_config_prefers_reward_model_fsdp_config():
     assert merged_cfg.actor.fsdp_config.strategy == "fsdp2"
     assert merged_cfg.actor.fsdp_config.fsdp_size == 4
     assert merged_cfg.actor.fsdp_config.forward_prefetch is True
+    assert merged_cfg.actor.ppo_mini_batch_size == 128
     assert merged_cfg.actor.ppo_micro_batch_size_per_gpu == 1
     assert merged_cfg.actor.ppo_max_token_len_per_gpu == 24576
     assert merged_cfg.actor.profiler == {}
@@ -175,6 +177,7 @@ def test_genrm_actor_compat_config_defaults_to_fsdp2_dataclass_config():
     assert merged_cfg.actor.strategy == "fsdp2"
     assert merged_cfg.actor.fsdp_config.strategy == "fsdp2"
     assert merged_cfg.actor.fsdp_config.fsdp_size == -1
+    assert merged_cfg.actor.ppo_mini_batch_size == 256
     assert merged_cfg.actor.ppo_max_token_len_per_gpu == 16384
     assert actor_cfg.strategy == "fsdp2"
     assert actor_cfg.fsdp_config.strategy == "fsdp2"
