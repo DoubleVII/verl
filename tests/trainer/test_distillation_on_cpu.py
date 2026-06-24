@@ -101,9 +101,63 @@ def test_ref_policy_teacher_rejects_reference_kl_reward():
         validate_distillation_config(cfg)
 
 
-def test_reserved_teacher_error_clearly():
-    cfg = _compose_ppo(["distillation.enabled=True", "distillation.teacher.source=reward_model"])
-    with pytest.raises(NotImplementedError, match="not implemented yet"):
+def test_reward_model_teacher_gqm_prompt_config_loads():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=reward_model",
+            "distillation.teacher.prompt_source=reward_model_gqm_out",
+            "reward_model.enable=True",
+            "reward_model.strategy=GenRM",
+            "reward_model.genrm_engine_mode=hybrid",
+        ]
+    )
+    validate_distillation_config(cfg)
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+    assert distillation_cfg.teacher.source == "reward_model"
+    assert distillation_cfg.teacher.prompt_source == "reward_model_gqm_out"
+
+
+def test_reward_model_teacher_requires_gqm_prompt_source():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=reward_model",
+            "reward_model.enable=True",
+            "reward_model.strategy=GenRM",
+            "reward_model.genrm_engine_mode=hybrid",
+        ]
+    )
+    with pytest.raises(ValueError, match="reward_model_gqm_out"):
+        validate_distillation_config(cfg)
+
+
+def test_reward_model_teacher_requires_enabled_reward_model():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=reward_model",
+            "distillation.teacher.prompt_source=reward_model_gqm_out",
+            "reward_model.strategy=GenRM",
+            "reward_model.genrm_engine_mode=hybrid",
+        ]
+    )
+    with pytest.raises(ValueError, match="reward_model.enable=True"):
+        validate_distillation_config(cfg)
+
+
+def test_reward_model_teacher_rejects_rollout_only_genrm():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=reward_model",
+            "distillation.teacher.prompt_source=reward_model_gqm_out",
+            "reward_model.enable=True",
+            "reward_model.strategy=GenRM",
+            "reward_model.genrm_engine_mode=rollout",
+        ]
+    )
+    with pytest.raises(ValueError, match="genrm_engine_mode=hybrid"):
         validate_distillation_config(cfg)
 
 

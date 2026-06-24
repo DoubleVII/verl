@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple, Iterable, Any
 
 try:
@@ -45,6 +46,16 @@ try:
     from .language_detector import is_language_match
 except ImportError:
     from reward_utils.language_detector import is_language_match
+
+
+@dataclass
+class RewardProcessorOutput:
+    scores: Any
+    non_tensor_batch: Dict[str, Any] = field(default_factory=dict)
+
+
+GENRM_GQM_PROMPTS_KEY = "genrm_gqm_prompts"
+GENRM_GQM_OUTPUTS_KEY = "genrm_gqm_outputs"
 
 
 def single_extract_score(output_text: str) -> Optional[float]:
@@ -264,7 +275,8 @@ def compute_group_translation_scores(
     enable_language_detection: bool,
     indices: Optional[List[int]] = None,
     response_texts: Optional[List[Optional[str]]] = None,
-) -> Dict[int, float]:
+    return_gqm_outputs: bool = False,
+) -> Any:
     """Shared group-based translation scoring pipeline.
 
     Decodes responses, groups by uid, deduplicates translations, builds prompts,
@@ -286,7 +298,7 @@ def compute_group_translation_scores(
     if not indices:
         # Keep distributed RM generation collectives aligned across ranks even for empty local work; see fix de799290.
         generate_fn([])
-        return {}
+        return ({}, {}) if return_gqm_outputs else {}
 
     uids = data.non_tensor_batch.get("uid", None)
     if uids is None:
@@ -390,6 +402,8 @@ def compute_group_translation_scores(
         prompt_list.append({"prompt_token_ids": raw_ids})
 
     scores_dict: Dict[int, float] = {}
+    gqm_prompts_dict: Dict[int, Any] = {}
+    gqm_outputs_dict: Dict[int, str] = {}
     reward_failed_count = 0
 
     # Keep distributed RM generation collectives aligned across ranks even when this task has no local prompts; see fix de799290.
@@ -410,12 +424,17 @@ def compute_group_translation_scores(
                 sc = normalized[k] - penalty
                 for idx in targets:
                     scores_dict[idx] = sc
+                    if return_gqm_outputs:
+                        gqm_prompts_dict[idx] = prompt_list[j]
+                        gqm_outputs_dict[idx] = text
 
     for zero_indices in zero_groups:
         for idx in zero_indices:
             scores_dict[idx] = default_reward
 
     print(f"[DEBUG] Reward failed count: {reward_failed_count} / {len(scores_dict)}")
+    if return_gqm_outputs:
+        return scores_dict, gqm_prompts_dict, gqm_outputs_dict
     return scores_dict
 
 
@@ -705,6 +724,7 @@ class GroupRewardModelProcessor:
         self.default_reward = getattr(self.config, "default_reward", 0.0)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
+        self.return_gqm_outputs = self.config.custom_processor.get("return_gqm_outputs", False)
         if self.enable_language_detection:
             print(f"Language detection enabled")
         if self.tokenizer is None:
@@ -713,7 +733,7 @@ class GroupRewardModelProcessor:
             raise ValueError("input_tokenizer must be provided")
 
     def compute_scores(self, data, generate_fn):
-        scores_dict = compute_group_translation_scores(
+        result = compute_group_translation_scores(
             data, generate_fn, self.tokenizer, self.input_tokenizer,
             extractor_type=self.extractor_type,
             max_prompt_length=self.max_prompt_length,
@@ -723,9 +743,27 @@ class GroupRewardModelProcessor:
             default_reward=self.default_reward,
             overlong_buffer_cfg=self.overlong_buffer_cfg,
             enable_language_detection=self.enable_language_detection,
+            return_gqm_outputs=self.return_gqm_outputs,
         )
+        if self.return_gqm_outputs:
+            scores_dict, gqm_prompts_dict, gqm_outputs_dict = result
+        else:
+            scores_dict = result
+            gqm_prompts_dict = {}
+            gqm_outputs_dict = {}
         total_size = data.batch.batch_size[0]
-        return [scores_dict.get(i, self.default_reward) for i in range(total_size)]
+        scores = [scores_dict.get(i, self.default_reward) for i in range(total_size)]
+        if not self.return_gqm_outputs:
+            return scores
+        gqm_prompts = [gqm_prompts_dict.get(i, None) for i in range(total_size)]
+        gqm_outputs = [gqm_outputs_dict.get(i, "") for i in range(total_size)]
+        return RewardProcessorOutput(
+            scores=scores,
+            non_tensor_batch={
+                GENRM_GQM_PROMPTS_KEY: gqm_prompts,
+                GENRM_GQM_OUTPUTS_KEY: gqm_outputs,
+            },
+        )
 
 
 class SeedXRewardModelProcessor:

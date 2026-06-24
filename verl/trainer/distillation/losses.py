@@ -34,9 +34,23 @@ def validate_distillation_config(config) -> None:
     loss_mode = distillation_config.distillation_loss.loss_mode
     actor_strategy = config.actor_rollout_ref.actor.strategy
     if teacher_source == "reward_model":
-        raise NotImplementedError(
-            "distillation.teacher.source=reward_model is reserved for future GenRM-as-teacher support "
-            "and is not implemented yet."
+        if teacher_prompt_source != "reward_model_gqm_out":
+            raise ValueError(
+                "distillation.teacher.source=reward_model requires "
+                "distillation.teacher.prompt_source=reward_model_gqm_out."
+            )
+        if config.reward_model.strategy != "GenRM":
+            raise ValueError("distillation.teacher.source=reward_model requires reward_model.strategy=GenRM.")
+        if not config.reward_model.get("enable", False):
+            raise ValueError("distillation.teacher.source=reward_model requires reward_model.enable=True.")
+        if config.reward_model.get("genrm_engine_mode", "hybrid") != "hybrid":
+            raise ValueError(
+                "distillation.teacher.source=reward_model requires reward_model.genrm_engine_mode=hybrid."
+            )
+    elif teacher_prompt_source == "reward_model_gqm_out":
+        raise ValueError(
+            "distillation.teacher.prompt_source=reward_model_gqm_out requires "
+            "distillation.teacher.source=reward_model."
         )
     if teacher_prompt_source == "data_teacher_prompt" and teacher_source != "ref_policy":
         raise NotImplementedError(

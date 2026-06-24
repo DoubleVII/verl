@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from reward_utils.rm_lib import MultiTaskSelfRewardProcessor, compute_group_post_edit_scores
+from reward_utils.rm_lib import MultiTaskSelfRewardProcessor, compute_group_post_edit_scores, compute_group_translation_scores
 
 
 class _Batch:
@@ -84,6 +84,38 @@ def test_default_mode_keeps_mt_group_advantage_without_reward_scale():
     )
 
     assert scores == {0: pytest.approx((8 - (2 + 4) / 2) * 0.5)}
+
+
+def test_group_translation_scores_can_return_gqm_outputs_without_changing_scores():
+    input_tokenizer = _Tokenizer(["candidate one", "candidate two"])
+    tokenizer = _Tokenizer()
+    data = _Data(
+        ["candidate one", "candidate two"],
+        [_extra(), _extra()],
+        uids=["u0", "u0"],
+    )
+
+    scores, gqm_prompts, gqm_outputs = compute_group_translation_scores(
+        data,
+        lambda prompts: [_output("analysis\nA: 2, B: 8")],
+        tokenizer,
+        input_tokenizer,
+        extractor_type="none",
+        max_prompt_length=1000,
+        prompt_type="ranking_score",
+        add_example=False,
+        score_scale_factor=0.5,
+        default_reward=-1.0,
+        overlong_buffer_cfg=None,
+        enable_language_detection=False,
+        return_gqm_outputs=True,
+    )
+
+    assert scores == {0: pytest.approx(1.0), 1: pytest.approx(4.0)}
+    assert set(gqm_prompts) == {0, 1}
+    assert "prompt_token_ids" in gqm_prompts[0]
+    assert "prompt_token_ids" in gqm_prompts[1]
+    assert gqm_outputs == {0: "analysis\nA: 2, B: 8", 1: "analysis\nA: 2, B: 8"}
 
 
 def test_group_post_edit_dedupes_duplicate_post_edit_and_tracks_score_index():

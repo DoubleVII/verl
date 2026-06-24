@@ -33,18 +33,12 @@ class DistillationTeacherConfig(BaseConfig):
         if self.source not in {"ref_policy", "current_policy", "reward_model"}:
             raise ValueError(
                 f"Unsupported distillation.teacher.source={self.source!r}. "
-                "Supported values are 'ref_policy' and 'current_policy'. "
-                "'reward_model' is reserved for future GenRM teacher support."
+                "Supported values are 'ref_policy', 'current_policy', and 'reward_model'."
             )
-        if self.source == "reward_model":
-            raise NotImplementedError(
-                "distillation.teacher.source=reward_model is reserved for future GenRM-as-teacher support "
-                "and is not implemented yet."
-            )
-        if self.prompt_source not in {"actor_prompt", "data_teacher_prompt"}:
+        if self.prompt_source not in {"actor_prompt", "data_teacher_prompt", "reward_model_gqm_out"}:
             raise ValueError(
                 f"Unsupported distillation.teacher.prompt_source={self.prompt_source!r}. "
-                "Supported values are 'actor_prompt' and 'data_teacher_prompt'."
+                "Supported values are 'actor_prompt', 'data_teacher_prompt', and 'reward_model_gqm_out'."
             )
 
 

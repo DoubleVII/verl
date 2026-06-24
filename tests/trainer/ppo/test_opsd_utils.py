@@ -7,9 +7,13 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 
 from verl import DataProto
+from verl.interactions.gqm_post_edit_interaction import GQM_POST_EDIT_PROMPT
 from verl.trainer.ppo.opsd_utils import (
+    GENRM_GQM_PROMPTS_KEY,
+    GENRM_GQM_OUTPUTS_KEY,
     OPSD_TEACHER_PROMPT_KEY,
     attach_opsd_metadata,
+    build_reward_model_gqm_teacher_batch,
     build_opsd_teacher_batch,
     extract_opsd_teacher_prompt,
 )
@@ -42,6 +46,9 @@ class FakeTokenizer:
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
         }
+
+    def decode(self, token_ids, skip_special_tokens=False):
+        return "Decoded original GQM prompt"
 
 
 def _config(prompt_path="extra_info.teacher_prompt"):
@@ -145,6 +152,28 @@ def test_build_teacher_batch_renders_chat_list_prompts():
     build_opsd_teacher_batch(batch, tokenizer, _config())
 
     assert tokenizer.texts == ["Problem A\nAssistant:", "Problem B\nAssistant:"]
+
+
+def test_build_reward_model_gqm_teacher_batch_uses_online_gqm_outputs():
+    batch = _batch()
+    batch.non_tensor_batch[GENRM_GQM_PROMPTS_KEY] = np.array(
+        [{"prompt_token_ids": [1, 2, 3]}, {"prompt_token_ids": [4, 5, 6]}], dtype=object
+    )
+    batch.non_tensor_batch[GENRM_GQM_OUTPUTS_KEY] = np.array(
+        ["GQM analysis A\nScore: 80", "GQM analysis B\nScore: 70"], dtype=object
+    )
+    tokenizer = FakeTokenizer()
+
+    teacher_batch = build_reward_model_gqm_teacher_batch(batch, tokenizer, _config())
+
+    assert torch.equal(teacher_batch.batch["responses"], batch.batch["responses"])
+    assert torch.equal(teacher_batch.batch["response_mask"], batch.batch["response_mask"])
+    assert teacher_batch.batch["input_ids"].shape == (2, 66)
+    assert torch.all(teacher_batch.batch["attention_mask"][:, -2:] == 1)
+    assert "Decoded original GQM prompt" in tokenizer.texts[0]
+    assert "GQM analysis A" in tokenizer.texts[0]
+    assert GQM_POST_EDIT_PROMPT in tokenizer.texts[0]
+    assert tokenizer.texts[0].endswith("Assistant:")
 
 
 def test_get_gen_batch_keeps_opsd_metadata_on_training_batch():

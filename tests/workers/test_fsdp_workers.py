@@ -17,8 +17,9 @@ from types import SimpleNamespace
 import torch
 from omegaconf import OmegaConf
 
-from verl.utils.config import omega_conf_to_dataclass
+from reward_utils.rm_lib import GENRM_GQM_PROMPTS_KEY, GENRM_GQM_OUTPUTS_KEY, RewardProcessorOutput
 from verl.trainer.main_ppo import _select_genrm_reward_model_worker
+from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.fsdp_workers import (
     ActorRolloutRefWorker,
     GenerativeRewardModelRolloutWorker,
@@ -216,6 +217,28 @@ def test_genrm_worker_bootstraps_hybrid_rollout_without_loading_model(monkeypatc
     assert captured["input_tokenizer_path"] == "/tmp/policy-tokenizer"
 
 
+def test_genrm_actor_compat_config_carries_distillation_config():
+    config = OmegaConf.create(
+        {
+            "strategy": "GenRM",
+            "model": {"path": "/tmp/reward-model", "input_tokenizer": None},
+            "rollout": {"name": "sglang"},
+        }
+    )
+    distillation = OmegaConf.create(
+        {
+            "enabled": True,
+            "teacher": {"source": "reward_model", "prompt_source": "reward_model_gqm_out"},
+            "distillation_loss": {"loss_mode": "k3"},
+        }
+    )
+
+    merged_cfg = _build_genrm_actor_compat_config(config, distillation_config=distillation)
+
+    assert merged_cfg.distillation.teacher.source == "reward_model"
+    assert merged_cfg.distillation.teacher.prompt_source == "reward_model_gqm_out"
+
+
 def test_genrm_rollout_config_loads_static_weights_from_model_path():
     config = OmegaConf.create(
         {
@@ -349,3 +372,109 @@ def test_genrm_rollout_worker_compute_score_uses_rollout_engine_directly(monkeyp
     assert worker.rollout.release_calls == 1
     assert worker._rollout_released is True
     assert "rm_scores" in output.batch
+
+
+def test_genrm_worker_compute_score_returns_gqm_metadata(monkeypatch):
+    class FakeData:
+        def __init__(self):
+            self.meta_info = {"collect_genrm_gqm_outputs": True}
+            self.batch = SimpleNamespace(batch_size=(2,))
+
+        def to(self, device):
+            return self
+
+    class FakeProcessor:
+        return_gqm_outputs = False
+
+        def compute_scores(self, data, generate_fn):
+            assert self.return_gqm_outputs is True
+            return RewardProcessorOutput(
+                scores=[1.0, 2.0],
+                non_tensor_batch={
+                    GENRM_GQM_PROMPTS_KEY: [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}],
+                    GENRM_GQM_OUTPUTS_KEY: ["gqm-a", "gqm-b"],
+                },
+            )
+
+    worker = object.__new__(GenerativeRewardModelWorker)
+    worker._is_actor = False
+    worker.generation_config = None
+    worker.tokenizer = SimpleNamespace(eos_token_id=1, pad_token_id=0)
+    worker.rollout = SimpleNamespace(generate_for_rm=lambda prompts: [])
+    worker.custom_processor = FakeProcessor()
+
+    monkeypatch.setattr("verl.workers.fsdp_workers.get_device_id", lambda: 0)
+    monkeypatch.setattr("verl.workers.fsdp_workers.get_torch_device", lambda: SimpleNamespace(empty_cache=lambda: None))
+    monkeypatch.setattr(
+        GenerativeRewardModelWorker,
+        "_expand_to_token_level",
+        lambda self, data, scores: torch.zeros((2, 3)),
+    )
+    monkeypatch.setattr("verl.workers.fsdp_workers.topk_reduce_ratio_min_max", lambda _: (1.0, 1.0, 1.0))
+    monkeypatch.setattr("verl.workers.fsdp_workers.reduce_timing", lambda timing: timing)
+
+    output = worker.compute_rm_score(FakeData())
+
+    assert "rm_scores" in output.batch
+    assert output.non_tensor_batch[GENRM_GQM_PROMPTS_KEY].tolist() == [
+        {"prompt_token_ids": [1]},
+        {"prompt_token_ids": [2]},
+    ]
+    assert output.non_tensor_batch[GENRM_GQM_OUTPUTS_KEY].tolist() == ["gqm-a", "gqm-b"]
+    assert worker.custom_processor.return_gqm_outputs is False
+
+
+def test_genrm_worker_distillation_teacher_wraps_actor_logprobs(monkeypatch):
+    class FakeData:
+        def __init__(self):
+            self.meta_info = {}
+
+        def to(self, device):
+            return self
+
+    class FakeActor:
+        actor_module = object()
+
+        def __init__(self):
+            self.seen = None
+
+        def compute_log_prob(self, data, calculate_entropy=False, compute_topk=False):
+            self.seen = (data.meta_info.copy(), calculate_entropy, compute_topk)
+            return torch.ones((2, 3)), None
+
+    class FakeShardingManager:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    worker = object.__new__(GenerativeRewardModelWorker)
+    worker._is_actor = True
+    worker._is_offload_param = False
+    worker._world_size = 1
+    worker.actor = FakeActor()
+    worker.config = OmegaConf.create(
+        {
+            "actor": {
+                "ppo_micro_batch_size_per_gpu": 1,
+                "ppo_max_token_len_per_gpu": 16,
+                "use_dynamic_bsz": False,
+            },
+            "rollout": {"temperature": 1.0},
+            "distillation": {
+                "enabled": True,
+                "teacher": {"source": "reward_model", "prompt_source": "reward_model_gqm_out"},
+                "distillation_loss": {"loss_mode": "k3"},
+            },
+        }
+    )
+    worker.ulysses_sharding_manager = FakeShardingManager()
+
+    output = worker.compute_distillation_teacher_log_prob(FakeData())
+
+    assert torch.equal(output.batch["teacher_logprobs"], torch.ones((2, 3)))
+    meta_info, calculate_entropy, compute_topk = worker.actor.seen
+    assert calculate_entropy is False
+    assert compute_topk is False
+    assert meta_info["micro_batch_size"] == 1

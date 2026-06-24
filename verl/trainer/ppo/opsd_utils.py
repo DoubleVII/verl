@@ -8,14 +8,21 @@ import torch
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from verl import DataProto
+from verl.interactions.gqm_post_edit_interaction import GQM_POST_EDIT_PROMPT
 from verl.utils.torch_functional import postprocess_data
 
 
 OPSD_TEACHER_PROMPT_KEY = "opsd_teacher_prompt"
+GENRM_GQM_PROMPTS_KEY = "genrm_gqm_prompts"
+GENRM_GQM_OUTPUTS_KEY = "genrm_gqm_outputs"
 
 
 def distillation_uses_data_teacher_prompt(config: Any) -> bool:
     return _select(config, "distillation.teacher.prompt_source", "actor_prompt") == "data_teacher_prompt"
+
+
+def distillation_uses_reward_model_gqm_out(config: Any) -> bool:
+    return _select(config, "distillation.teacher.prompt_source", "actor_prompt") == "reward_model_gqm_out"
 
 
 def attach_opsd_metadata(batch: DataProto, config: Any) -> None:
@@ -48,10 +55,90 @@ def build_opsd_teacher_batch(batch: DataProto, tokenizer: Any, config: Any) -> D
     if OPSD_TEACHER_PROMPT_KEY not in batch.non_tensor_batch:
         raise ValueError("OPSD metadata is missing from rollout batch")
 
+    return _build_teacher_batch_from_prompts(batch, tokenizer, config, batch.non_tensor_batch[OPSD_TEACHER_PROMPT_KEY])
+
+
+def build_reward_model_gqm_teacher_batch(batch: DataProto, tokenizer: Any, config: Any) -> DataProto:
+    """Return a teacher batch prompted by online GenRM GQM outputs."""
+    if GENRM_GQM_PROMPTS_KEY not in batch.non_tensor_batch:
+        raise ValueError(
+            "GenRM GQM prompts are missing from rollout batch. "
+            "Expected reward model metadata key: genrm_gqm_prompts"
+        )
+    if GENRM_GQM_OUTPUTS_KEY not in batch.non_tensor_batch:
+        raise ValueError(
+            "GenRM GQM outputs are missing from rollout batch. "
+            "Expected reward model metadata key: genrm_gqm_outputs"
+        )
+
+    teacher_prompts = [
+        _build_reward_model_gqm_prompt(gqm_prompt, gqm_output, tokenizer)
+        for gqm_prompt, gqm_output in zip(
+            batch.non_tensor_batch[GENRM_GQM_PROMPTS_KEY],
+            batch.non_tensor_batch[GENRM_GQM_OUTPUTS_KEY],
+            strict=True,
+        )
+    ]
+    return _build_teacher_batch_from_prompts(batch, tokenizer, config, teacher_prompts)
+
+
+def _sample_dict_from_dataproto(batch: DataProto, index: int) -> dict[str, Any]:
+    sample: dict[str, Any] = {}
+    for key, value in batch.non_tensor_batch.items():
+        sample[key] = value[index]
+    return sample
+
+
+def _render_teacher_prompt(teacher_prompt: Any, tokenizer: Any, apply_chat_template_kwargs: dict[str, Any]) -> str:
+    if isinstance(teacher_prompt, np.ndarray):
+        teacher_prompt = teacher_prompt.tolist()
+    if isinstance(teacher_prompt, (list, tuple)):
+        return tokenizer.apply_chat_template(
+            list(teacher_prompt),
+            add_generation_prompt=True,
+            tokenize=False,
+            **apply_chat_template_kwargs,
+        )
+    return str(teacher_prompt)
+
+
+def _build_reward_model_gqm_prompt(gqm_prompt: Any, gqm_output: Any, tokenizer: Any) -> list[dict[str, str]]:
+    gqm_prompt_text = _render_genrm_prompt(gqm_prompt, tokenizer).strip()
+    if not gqm_prompt_text:
+        raise ValueError("GenRM GQM prompt is missing or empty for reward_model_gqm_out teacher prompt.")
+    if isinstance(gqm_output, np.ndarray):
+        gqm_output = gqm_output.tolist()
+    gqm_text = str(gqm_output).strip()
+    if not gqm_text:
+        raise ValueError("GenRM GQM output is missing or empty for reward_model_gqm_out teacher prompt.")
+    return [
+        {"role": "user", "content": gqm_prompt_text},
+        {"role": "assistant", "content": gqm_text},
+        {"role": "user", "content": GQM_POST_EDIT_PROMPT},
+    ]
+
+
+def _render_genrm_prompt(gqm_prompt: Any, tokenizer: Any) -> str:
+    if isinstance(gqm_prompt, np.ndarray):
+        gqm_prompt = gqm_prompt.tolist()
+    if isinstance(gqm_prompt, dict) and "prompt_token_ids" in gqm_prompt:
+        token_ids = gqm_prompt["prompt_token_ids"]
+        return tokenizer.decode(token_ids, skip_special_tokens=False)
+    if isinstance(gqm_prompt, (list, tuple)):
+        return tokenizer.decode(list(gqm_prompt), skip_special_tokens=False)
+    return str(gqm_prompt)
+
+
+def _build_teacher_batch_from_prompts(
+    batch: DataProto,
+    tokenizer: Any,
+    config: Any,
+    teacher_prompts: list[Any],
+) -> DataProto:
     apply_chat_template_kwargs = _select(config, "data.apply_chat_template_kwargs", {}) or {}
     prompts = [
         _render_teacher_prompt(teacher_prompt, tokenizer, apply_chat_template_kwargs)
-        for teacher_prompt in batch.non_tensor_batch[OPSD_TEACHER_PROMPT_KEY]
+        for teacher_prompt in teacher_prompts
     ]
 
     prompt_ids, prompt_attention_mask = _tokenize_and_left_pad_prompts(
@@ -78,26 +165,6 @@ def build_opsd_teacher_batch(batch: DataProto, tokenizer: Any, config: Any) -> D
     teacher_batch.batch["attention_mask"] = attention_mask
     teacher_batch.batch["position_ids"] = position_ids
     return teacher_batch
-
-
-def _sample_dict_from_dataproto(batch: DataProto, index: int) -> dict[str, Any]:
-    sample: dict[str, Any] = {}
-    for key, value in batch.non_tensor_batch.items():
-        sample[key] = value[index]
-    return sample
-
-
-def _render_teacher_prompt(teacher_prompt: Any, tokenizer: Any, apply_chat_template_kwargs: dict[str, Any]) -> str:
-    if isinstance(teacher_prompt, np.ndarray):
-        teacher_prompt = teacher_prompt.tolist()
-    if isinstance(teacher_prompt, (list, tuple)):
-        return tokenizer.apply_chat_template(
-            list(teacher_prompt),
-            add_generation_prompt=True,
-            tokenize=False,
-            **apply_chat_template_kwargs,
-        )
-    return str(teacher_prompt)
 
 
 def _tokenize_and_left_pad_prompts(

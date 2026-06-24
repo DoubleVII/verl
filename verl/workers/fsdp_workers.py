@@ -1954,7 +1954,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         return output
 
 
-def _build_genrm_actor_compat_config(config: DictConfig, actor_config: Optional[DictConfig] = None) -> DictConfig:
+def _build_genrm_actor_compat_config(
+    config: DictConfig,
+    actor_config: Optional[DictConfig] = None,
+    distillation_config: Optional[DictConfig] = None,
+) -> DictConfig:
     """Build the minimal actor-like config needed for GenRM hybrid rollout.
 
     Generative reward model scoring needs the hybrid actor_rollout path so
@@ -1999,6 +2003,9 @@ def _build_genrm_actor_compat_config(config: DictConfig, actor_config: Optional[
         config_without_actor,
         OmegaConf.create({"actor": actor_cfg}),
     )
+    if distillation_config is not None:
+        with open_dict(merged_cfg):
+            merged_cfg.distillation = distillation_config
 
     if OmegaConf.select(merged_cfg, "model") is not None:
         with open_dict(merged_cfg.model):
@@ -2035,10 +2042,13 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
     def __init__(self, config: DictConfig, **kwargs):
 
         actor_config = kwargs.get("actor_config", None)
+        distillation_config = kwargs.get("distillation_config", None)
 
         input_tokenizer_path = OmegaConf.select(config, "model.input_tokenizer")
         tokenizer_path = config.model.path
-        merged_cfg = _build_genrm_actor_compat_config(config, actor_config=actor_config)
+        merged_cfg = _build_genrm_actor_compat_config(
+            config, actor_config=actor_config, distillation_config=distillation_config
+        )
 
         super().__init__(merged_cfg, role="actor_rollout", disable_optim=True, **kwargs)
 
@@ -2103,10 +2113,22 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
 
         with simple_timer("generate_rewards", timing_generate):
             generate_fn = self.rollout.generate_for_rm
-            reward_scores = self.custom_processor.compute_scores(
-                data,
-                generate_fn,
-            )
+            collect_gqm_outputs = data.meta_info.get("collect_genrm_gqm_outputs", False)
+            had_return_gqm_outputs = hasattr(self.custom_processor, "return_gqm_outputs")
+            old_return_gqm_outputs = getattr(self.custom_processor, "return_gqm_outputs", None)
+            if collect_gqm_outputs and had_return_gqm_outputs:
+                self.custom_processor.return_gqm_outputs = True
+            try:
+                reward_result = self.custom_processor.compute_scores(
+                    data,
+                    generate_fn,
+                )
+            finally:
+                if collect_gqm_outputs and had_return_gqm_outputs:
+                    self.custom_processor.return_gqm_outputs = old_return_gqm_outputs
+
+        reward_metadata = getattr(reward_result, "non_tensor_batch", {})
+        reward_scores = getattr(reward_result, "scores", reward_result)
         if not isinstance(reward_scores, torch.Tensor):
             reward_tensor = torch.tensor(reward_scores, dtype=torch.float32)
         else:
@@ -2132,11 +2154,49 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
 
         token_level_scores = self._expand_to_token_level(data, reward_tensor)
         # Note that this is only the scores, may not be the final rewards used to train RL
-        output = DataProto.from_dict(tensors={"rm_scores": token_level_scores})
+        output = DataProto.from_dict(tensors={"rm_scores": token_level_scores}, non_tensors=reward_metadata)
         output = output.to("cpu")
 
         # clear kv cache
         get_torch_device().empty_cache()
+        return output
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="olive", role="reward_model_distillation_teacher")
+    def compute_distillation_teacher_log_prob(self, data: DataProto):
+        assert self._is_actor
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        data.meta_info["micro_batch_size"] = self.config.actor.ppo_micro_batch_size_per_gpu
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["max_token_len"] = self.config.actor.ppo_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.actor.use_dynamic_bsz
+
+        distillation_config = self.config.get("distillation", None)
+        compute_topk = is_forward_kl_topk_enabled(distillation_config)
+        with self.ulysses_sharding_manager:
+            data = data.to("cpu")
+            teacher_outputs = self.actor.compute_log_prob(
+                data=data, calculate_entropy=False, compute_topk=compute_topk
+            )
+            if compute_topk:
+                output, _, teacher_logprobs, teacher_ids = teacher_outputs
+                tensors = {"teacher_logprobs": teacher_logprobs, "teacher_ids": teacher_ids}
+            else:
+                output, _ = teacher_outputs
+                tensors = {"teacher_logprobs": output}
+            output = DataProto.from_dict(tensors=tensors)
+
+        output = output.to("cpu")
+
+        if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
+            self.actor.actor_module._handle.reshard(True)
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            log_gpu_memory_usage("After offload reward model during compute_distillation_teacher_log_prob", logger=logger)
+
         return output
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):

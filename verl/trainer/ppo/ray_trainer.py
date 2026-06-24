@@ -54,7 +54,9 @@ from verl.trainer.ppo.opsd_utils import (
     OPSD_TEACHER_PROMPT_KEY,
     attach_opsd_metadata,
     build_opsd_teacher_batch,
+    build_reward_model_gqm_teacher_batch,
     distillation_uses_data_teacher_prompt,
+    distillation_uses_reward_model_gqm_out,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
@@ -336,6 +338,7 @@ class RayPPOTrainer:
         )
         self.distillation_forward_kl_topk = is_forward_kl_topk_enabled(self.config.get("distillation"))
         self.distillation_data_teacher_prompt = distillation_uses_data_teacher_prompt(self.config)
+        self.distillation_reward_model_gqm_out = distillation_uses_reward_model_gqm_out(self.config)
         if self.use_distillation:
             with open_dict(self.config.actor_rollout_ref):
                 self.config.actor_rollout_ref.distillation = self.config.distillation
@@ -757,7 +760,10 @@ class RayPPOTrainer:
         if self.use_rm and not self.use_self_reward:
             # we create a RM here
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel)
-            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], config=self.config.reward_model, actor_config=self.config.actor_rollout_ref)
+            rm_kwargs = {"config": self.config.reward_model, "actor_config": self.config.actor_rollout_ref}
+            if self.use_distillation and self.distillation_teacher_source == "reward_model":
+                rm_kwargs["distillation_config"] = self.config.distillation
+            rm_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RewardModel], **rm_kwargs)
             self.resource_pool_to_cls[resource_pool][str(Role.RewardModel)] = rm_cls
 
         # initialize WorkerGroup
@@ -1268,8 +1274,18 @@ class RayPPOTrainer:
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            if self.use_distillation and self.distillation_reward_model_gqm_out:
+                                batch.meta_info["collect_genrm_gqm_outputs"] = True
+                            try:
+                                reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            finally:
+                                batch.meta_info.pop("collect_genrm_gqm_outputs", None)
                             batch = batch.union(reward_tensor)
+                        elif self.use_distillation and self.distillation_reward_model_gqm_out:
+                            raise ValueError(
+                                "distillation.teacher.prompt_source=reward_model_gqm_out requires online GenRM "
+                                "reward generation in this step, but rm_scores are already present."
+                            )
 
                         if self.config.reward_model.launch_reward_fn_async:
                             future_reward = compute_reward_async.remote(
@@ -1324,6 +1340,13 @@ class RayPPOTrainer:
                             elif "ref_log_prob" in teacher_logprobs.batch:
                                 teacher_logprobs.batch.pop("ref_log_prob")
                             batch = batch.union(teacher_logprobs)
+
+                    if self.use_distillation and self.distillation_teacher_source == "reward_model":
+                        with marked_timer("reward_model_distillation_teacher", timing_raw, color="olive"):
+                            teacher_input_batch = build_reward_model_gqm_teacher_batch(batch, self.tokenizer, self.config)
+                            teacher_logprobs = self.rm_wg.compute_distillation_teacher_log_prob(teacher_input_batch)
+                            batch = batch.union(teacher_logprobs)
+                            metrics["opsd/reward_model_gqm_out"] = 1.0
 
                     # compute values
                     if self.use_critic:
