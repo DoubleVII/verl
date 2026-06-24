@@ -54,8 +54,8 @@ class RewardProcessorOutput:
     non_tensor_batch: Dict[str, Any] = field(default_factory=dict)
 
 
-GENRM_GQM_PROMPTS_KEY = "genrm_gqm_prompts"
-GENRM_GQM_OUTPUTS_KEY = "genrm_gqm_outputs"
+REWARD_MODEL_PROMPTS_KEY = "reward_model_prompts"
+REWARD_MODEL_RESPONSES_KEY = "reward_model_responses"
 
 
 def single_extract_score(output_text: str) -> Optional[float]:
@@ -275,7 +275,8 @@ def compute_group_translation_scores(
     enable_language_detection: bool,
     indices: Optional[List[int]] = None,
     response_texts: Optional[List[Optional[str]]] = None,
-    return_gqm_outputs: bool = False,
+    return_reward_model_metadata: bool = False,
+    return_gqm_outputs: Optional[bool] = None,
 ) -> Any:
     """Shared group-based translation scoring pipeline.
 
@@ -290,6 +291,9 @@ def compute_group_translation_scores(
     Returns:
         Dict mapping original batch index to score.
     """
+    if return_gqm_outputs is not None:
+        return_reward_model_metadata = return_gqm_outputs
+
     responses = response_texts if response_texts is not None else _decode_response(data, input_tokenizer, extractor_type)
     extra = data.non_tensor_batch["extra_info"]
 
@@ -298,7 +302,7 @@ def compute_group_translation_scores(
     if not indices:
         # Keep distributed RM generation collectives aligned across ranks even for empty local work; see fix de799290.
         generate_fn([])
-        return ({}, {}) if return_gqm_outputs else {}
+        return ({}, {}, {}) if return_reward_model_metadata else {}
 
     uids = data.non_tensor_batch.get("uid", None)
     if uids is None:
@@ -424,7 +428,7 @@ def compute_group_translation_scores(
                 sc = normalized[k] - penalty
                 for idx in targets:
                     scores_dict[idx] = sc
-                    if return_gqm_outputs:
+                    if return_reward_model_metadata:
                         gqm_prompts_dict[idx] = prompt_list[j]
                         gqm_outputs_dict[idx] = text
 
@@ -433,7 +437,7 @@ def compute_group_translation_scores(
             scores_dict[idx] = default_reward
 
     print(f"[DEBUG] Reward failed count: {reward_failed_count} / {len(scores_dict)}")
-    if return_gqm_outputs:
+    if return_reward_model_metadata:
         return scores_dict, gqm_prompts_dict, gqm_outputs_dict
     return scores_dict
 
@@ -724,7 +728,10 @@ class GroupRewardModelProcessor:
         self.default_reward = getattr(self.config, "default_reward", 0.0)
         self.overlong_buffer_cfg = self.config.custom_processor.get("overlong_buffer", None)
         self.enable_language_detection = self.config.custom_processor.get("enable_language_detection", False)
-        self.return_gqm_outputs = self.config.custom_processor.get("return_gqm_outputs", False)
+        self.return_reward_model_metadata = self.config.custom_processor.get(
+            "return_reward_model_metadata",
+            self.config.custom_processor.get("return_gqm_outputs", False),
+        )
         if self.enable_language_detection:
             print(f"Language detection enabled")
         if self.tokenizer is None:
@@ -743,9 +750,9 @@ class GroupRewardModelProcessor:
             default_reward=self.default_reward,
             overlong_buffer_cfg=self.overlong_buffer_cfg,
             enable_language_detection=self.enable_language_detection,
-            return_gqm_outputs=self.return_gqm_outputs,
+            return_reward_model_metadata=self.return_reward_model_metadata,
         )
-        if self.return_gqm_outputs:
+        if self.return_reward_model_metadata:
             scores_dict, gqm_prompts_dict, gqm_outputs_dict = result
         else:
             scores_dict = result
@@ -753,15 +760,15 @@ class GroupRewardModelProcessor:
             gqm_outputs_dict = {}
         total_size = data.batch.batch_size[0]
         scores = [scores_dict.get(i, self.default_reward) for i in range(total_size)]
-        if not self.return_gqm_outputs:
+        if not self.return_reward_model_metadata:
             return scores
         gqm_prompts = [gqm_prompts_dict.get(i, None) for i in range(total_size)]
         gqm_outputs = [gqm_outputs_dict.get(i, "") for i in range(total_size)]
         return RewardProcessorOutput(
             scores=scores,
             non_tensor_batch={
-                GENRM_GQM_PROMPTS_KEY: gqm_prompts,
-                GENRM_GQM_OUTPUTS_KEY: gqm_outputs,
+                REWARD_MODEL_PROMPTS_KEY: gqm_prompts,
+                REWARD_MODEL_RESPONSES_KEY: gqm_outputs,
             },
         )
 

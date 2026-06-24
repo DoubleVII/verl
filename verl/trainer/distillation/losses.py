@@ -34,10 +34,20 @@ def validate_distillation_config(config) -> None:
     loss_mode = distillation_config.distillation_loss.loss_mode
     actor_strategy = config.actor_rollout_ref.actor.strategy
     if teacher_source == "reward_model":
-        if teacher_prompt_source != "reward_model_gqm_out":
+        if teacher_prompt_source != "reward_model":
             raise ValueError(
                 "distillation.teacher.source=reward_model requires "
-                "distillation.teacher.prompt_source=reward_model_gqm_out."
+                "distillation.teacher.prompt_source=reward_model."
+            )
+        if not distillation_config.teacher.get("prompt_constructor_path", None):
+            raise ValueError(
+                "distillation.teacher.source=reward_model requires "
+                "distillation.teacher.prompt_constructor_path."
+            )
+        if not distillation_config.teacher.get("prompt_constructor_name", None):
+            raise ValueError(
+                "distillation.teacher.source=reward_model requires "
+                "distillation.teacher.prompt_constructor_name."
             )
         if config.reward_model.strategy != "GenRM":
             raise ValueError("distillation.teacher.source=reward_model requires reward_model.strategy=GenRM.")
@@ -47,9 +57,9 @@ def validate_distillation_config(config) -> None:
             raise ValueError(
                 "distillation.teacher.source=reward_model requires reward_model.genrm_engine_mode=hybrid."
             )
-    elif teacher_prompt_source == "reward_model_gqm_out":
+    elif teacher_prompt_source == "reward_model":
         raise ValueError(
-            "distillation.teacher.prompt_source=reward_model_gqm_out requires "
+            "distillation.teacher.prompt_source=reward_model requires "
             "distillation.teacher.source=reward_model."
         )
     if teacher_prompt_source == "data_teacher_prompt" and teacher_source != "ref_policy":

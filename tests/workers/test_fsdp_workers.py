@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import torch
 from omegaconf import OmegaConf
 
-from reward_utils.rm_lib import GENRM_GQM_PROMPTS_KEY, GENRM_GQM_OUTPUTS_KEY, RewardProcessorOutput
+from reward_utils.rm_lib import REWARD_MODEL_PROMPTS_KEY, REWARD_MODEL_RESPONSES_KEY, RewardProcessorOutput
 from verl.trainer.main_ppo import _select_genrm_reward_model_worker
 from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.fsdp_workers import (
@@ -231,7 +231,7 @@ def test_genrm_actor_compat_config_carries_distillation_config():
     distillation = OmegaConf.create(
         {
             "enabled": True,
-            "teacher": {"source": "reward_model", "prompt_source": "reward_model_gqm_out"},
+            "teacher": {"source": "reward_model", "prompt_source": "reward_model"},
             "distillation_loss": {"loss_mode": "k3"},
         }
     )
@@ -239,7 +239,7 @@ def test_genrm_actor_compat_config_carries_distillation_config():
     merged_cfg = _build_genrm_actor_compat_config(config, distillation_config=distillation)
 
     assert merged_cfg.distillation.teacher.source == "reward_model"
-    assert merged_cfg.distillation.teacher.prompt_source == "reward_model_gqm_out"
+    assert merged_cfg.distillation.teacher.prompt_source == "reward_model"
 
 
 def test_genrm_rollout_config_loads_static_weights_from_model_path():
@@ -380,22 +380,22 @@ def test_genrm_rollout_worker_compute_score_uses_rollout_engine_directly(monkeyp
 def test_genrm_worker_compute_score_returns_gqm_metadata(monkeypatch):
     class FakeData:
         def __init__(self):
-            self.meta_info = {"collect_genrm_gqm_outputs": True}
+            self.meta_info = {"collect_reward_model_metadata": True}
             self.batch = SimpleNamespace(batch_size=(2,))
 
         def to(self, device):
             return self
 
     class FakeProcessor:
-        return_gqm_outputs = False
+        return_reward_model_metadata = False
 
         def compute_scores(self, data, generate_fn):
-            assert self.return_gqm_outputs is True
+            assert self.return_reward_model_metadata is True
             return RewardProcessorOutput(
                 scores=[1.0, 2.0],
                 non_tensor_batch={
-                    GENRM_GQM_PROMPTS_KEY: [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}],
-                    GENRM_GQM_OUTPUTS_KEY: ["gqm-a", "gqm-b"],
+                    REWARD_MODEL_PROMPTS_KEY: [{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}],
+                    REWARD_MODEL_RESPONSES_KEY: ["gqm-a", "gqm-b"],
                 },
             )
 
@@ -419,12 +419,12 @@ def test_genrm_worker_compute_score_returns_gqm_metadata(monkeypatch):
     output = worker.compute_rm_score(FakeData())
 
     assert "rm_scores" in output.batch
-    assert output.non_tensor_batch[GENRM_GQM_PROMPTS_KEY].tolist() == [
+    assert output.non_tensor_batch[REWARD_MODEL_PROMPTS_KEY].tolist() == [
         {"prompt_token_ids": [1]},
         {"prompt_token_ids": [2]},
     ]
-    assert output.non_tensor_batch[GENRM_GQM_OUTPUTS_KEY].tolist() == ["gqm-a", "gqm-b"]
-    assert worker.custom_processor.return_gqm_outputs is False
+    assert output.non_tensor_batch[REWARD_MODEL_RESPONSES_KEY].tolist() == ["gqm-a", "gqm-b"]
+    assert worker.custom_processor.return_reward_model_metadata is False
 
 
 def test_genrm_worker_distillation_teacher_wraps_actor_logprobs(monkeypatch):
@@ -467,7 +467,7 @@ def test_genrm_worker_distillation_teacher_wraps_actor_logprobs(monkeypatch):
             "rollout": {"temperature": 1.0},
             "distillation": {
                 "enabled": True,
-                "teacher": {"source": "reward_model", "prompt_source": "reward_model_gqm_out"},
+                "teacher": {"source": "reward_model", "prompt_source": "reward_model"},
                 "distillation_loss": {"loss_mode": "k3"},
             },
         }

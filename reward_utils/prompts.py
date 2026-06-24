@@ -1,9 +1,54 @@
-from typing import List
+from typing import Any, List
+
+import numpy as np
 
 try:
     from .config import LANG_MAP, candidate_identifiers
 except ImportError:
     from reward_utils.config import LANG_MAP, candidate_identifiers
+
+try:
+    from verl.interactions.gqm_post_edit_interaction import GQM_POST_EDIT_PROMPT
+except ImportError:
+    GQM_POST_EDIT_PROMPT = (
+        "Using the source text, candidate translations, and evaluation above, provide the final improved translation "
+        "in the target language. Include a concise step-by-step analysis, then output only the final translation in a "
+        "single Markdown code block."
+    )
+
+
+def _render_reward_model_prompt(prompt: Any, tokenizer: Any) -> str:
+    if isinstance(prompt, np.ndarray):
+        prompt = prompt.tolist()
+    if isinstance(prompt, dict) and "prompt_token_ids" in prompt:
+        return tokenizer.decode(prompt["prompt_token_ids"], skip_special_tokens=False)
+    if isinstance(prompt, (list, tuple)):
+        return tokenizer.decode(list(prompt), skip_special_tokens=False)
+    return str(prompt)
+
+
+def gqm_post_edit_teacher_prompt_constructor(
+    prompt: Any,
+    response: Any,
+    tokenizer: Any,
+    sample: dict[str, Any] | None = None,
+    config: Any | None = None,
+    post_edit_prompt: str = GQM_POST_EDIT_PROMPT,
+) -> list[dict[str, str]]:
+    """Build a post-edit teacher prompt from generic reward-model metadata."""
+    prompt_text = _render_reward_model_prompt(prompt, tokenizer).strip()
+    if isinstance(response, np.ndarray):
+        response = response.tolist()
+    response_text = str(response).strip()
+    if not prompt_text:
+        raise ValueError("Reward model prompt is missing or empty.")
+    if not response_text:
+        raise ValueError("Reward model response is missing or empty.")
+    return [
+        {"role": "user", "content": prompt_text},
+        {"role": "assistant", "content": response_text},
+        {"role": "user", "content": post_edit_prompt},
+    ]
 
 
 SINGLE_PROMPT_TEMPLATE = """Given a source text in {} and a translation text in {}. Perform a step by step analysis of translation quality and assign a score on a scale from 0 to 10.
@@ -171,4 +216,3 @@ def _vanilla_rm_build_prompt(tokenizer, src_lang: str, trg_lang: str, src_text: 
         prompt += " "
     full_prompt = f"{prompt}{mt_text}{tokenizer.eos_token}"
     return full_prompt
-

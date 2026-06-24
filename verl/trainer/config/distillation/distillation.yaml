@@ -14,6 +14,9 @@ teacher:
   ref_model_path: null
   prompt_source: actor_prompt
   teacher_prompt_path: extra_info.teacher_prompt
+  prompt_constructor_path: null
+  prompt_constructor_name: null
+  prompt_constructor_kwargs: {}
 
 # Distillation loss config.
 distillation_loss:

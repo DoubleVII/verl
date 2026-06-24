@@ -54,9 +54,9 @@ from verl.trainer.ppo.opsd_utils import (
     OPSD_TEACHER_PROMPT_KEY,
     attach_opsd_metadata,
     build_opsd_teacher_batch,
-    build_reward_model_gqm_teacher_batch,
+    build_reward_model_teacher_batch,
     distillation_uses_data_teacher_prompt,
-    distillation_uses_reward_model_gqm_out,
+    distillation_uses_reward_model_prompt,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
@@ -338,7 +338,7 @@ class RayPPOTrainer:
         )
         self.distillation_forward_kl_topk = is_forward_kl_topk_enabled(self.config.get("distillation"))
         self.distillation_data_teacher_prompt = distillation_uses_data_teacher_prompt(self.config)
-        self.distillation_reward_model_gqm_out = distillation_uses_reward_model_gqm_out(self.config)
+        self.distillation_reward_model_prompt = distillation_uses_reward_model_prompt(self.config)
         if self.use_distillation:
             with open_dict(self.config.actor_rollout_ref):
                 self.config.actor_rollout_ref.distillation = self.config.distillation
@@ -1274,16 +1274,16 @@ class RayPPOTrainer:
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            if self.use_distillation and self.distillation_reward_model_gqm_out:
-                                batch.meta_info["collect_genrm_gqm_outputs"] = True
+                            if self.use_distillation and self.distillation_reward_model_prompt:
+                                batch.meta_info["collect_reward_model_metadata"] = True
                             try:
                                 reward_tensor = self.rm_wg.compute_rm_score(batch)
                             finally:
-                                batch.meta_info.pop("collect_genrm_gqm_outputs", None)
+                                batch.meta_info.pop("collect_reward_model_metadata", None)
                             batch = batch.union(reward_tensor)
-                        elif self.use_distillation and self.distillation_reward_model_gqm_out:
+                        elif self.use_distillation and self.distillation_reward_model_prompt:
                             raise ValueError(
-                                "distillation.teacher.prompt_source=reward_model_gqm_out requires online GenRM "
+                                "distillation.teacher.prompt_source=reward_model requires online GenRM "
                                 "reward generation in this step, but rm_scores are already present."
                             )
 
@@ -1343,10 +1343,10 @@ class RayPPOTrainer:
 
                     if self.use_distillation and self.distillation_teacher_source == "reward_model":
                         with marked_timer("reward_model_distillation_teacher", timing_raw, color="olive"):
-                            teacher_input_batch = build_reward_model_gqm_teacher_batch(batch, self.tokenizer, self.config)
+                            teacher_input_batch = build_reward_model_teacher_batch(batch, self.tokenizer, self.config)
                             teacher_logprobs = self.rm_wg.compute_distillation_teacher_log_prob(teacher_input_batch)
                             batch = batch.union(teacher_logprobs)
-                            metrics["opsd/reward_model_gqm_out"] = 1.0
+                            metrics["opsd/reward_model"] = 1.0
 
                     # compute values
                     if self.use_critic:

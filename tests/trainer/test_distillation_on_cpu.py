@@ -106,7 +106,9 @@ def test_reward_model_teacher_gqm_prompt_config_loads():
         [
             "distillation.enabled=True",
             "distillation.teacher.source=reward_model",
-            "distillation.teacher.prompt_source=reward_model_gqm_out",
+            "distillation.teacher.prompt_source=reward_model",
+            "distillation.teacher.prompt_constructor_path=reward_utils/prompts.py",
+            "distillation.teacher.prompt_constructor_name=gqm_post_edit_teacher_prompt_constructor",
             "reward_model.enable=True",
             "reward_model.strategy=GenRM",
             "reward_model.genrm_engine_mode=hybrid",
@@ -115,7 +117,7 @@ def test_reward_model_teacher_gqm_prompt_config_loads():
     validate_distillation_config(cfg)
     distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
     assert distillation_cfg.teacher.source == "reward_model"
-    assert distillation_cfg.teacher.prompt_source == "reward_model_gqm_out"
+    assert distillation_cfg.teacher.prompt_source == "reward_model"
 
 
 def test_reward_model_teacher_requires_gqm_prompt_source():
@@ -128,7 +130,7 @@ def test_reward_model_teacher_requires_gqm_prompt_source():
             "reward_model.genrm_engine_mode=hybrid",
         ]
     )
-    with pytest.raises(ValueError, match="reward_model_gqm_out"):
+    with pytest.raises(ValueError, match="reward_model"):
         validate_distillation_config(cfg)
 
 
@@ -137,7 +139,9 @@ def test_reward_model_teacher_requires_enabled_reward_model():
         [
             "distillation.enabled=True",
             "distillation.teacher.source=reward_model",
-            "distillation.teacher.prompt_source=reward_model_gqm_out",
+            "distillation.teacher.prompt_source=reward_model",
+            "distillation.teacher.prompt_constructor_path=reward_utils/prompts.py",
+            "distillation.teacher.prompt_constructor_name=gqm_post_edit_teacher_prompt_constructor",
             "reward_model.strategy=GenRM",
             "reward_model.genrm_engine_mode=hybrid",
         ]
@@ -146,12 +150,29 @@ def test_reward_model_teacher_requires_enabled_reward_model():
         validate_distillation_config(cfg)
 
 
+def test_reward_model_teacher_requires_prompt_constructor():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=reward_model",
+            "distillation.teacher.prompt_source=reward_model",
+            "reward_model.enable=True",
+            "reward_model.strategy=GenRM",
+            "reward_model.genrm_engine_mode=hybrid",
+        ]
+    )
+    with pytest.raises(ValueError, match="prompt_constructor_path"):
+        validate_distillation_config(cfg)
+
+
 def test_reward_model_teacher_rejects_rollout_only_genrm():
     cfg = _compose_ppo(
         [
             "distillation.enabled=True",
             "distillation.teacher.source=reward_model",
-            "distillation.teacher.prompt_source=reward_model_gqm_out",
+            "distillation.teacher.prompt_source=reward_model",
+            "distillation.teacher.prompt_constructor_path=reward_utils/prompts.py",
+            "distillation.teacher.prompt_constructor_name=gqm_post_edit_teacher_prompt_constructor",
             "reward_model.enable=True",
             "reward_model.strategy=GenRM",
             "reward_model.genrm_engine_mode=rollout",

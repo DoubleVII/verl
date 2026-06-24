@@ -28,6 +28,9 @@ class DistillationTeacherConfig(BaseConfig):
     ref_model_path: Optional[str] = None
     prompt_source: str = "actor_prompt"
     teacher_prompt_path: str = "extra_info.teacher_prompt"
+    prompt_constructor_path: Optional[str] = None
+    prompt_constructor_name: Optional[str] = None
+    prompt_constructor_kwargs: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.source not in {"ref_policy", "current_policy", "reward_model"}:
@@ -35,10 +38,10 @@ class DistillationTeacherConfig(BaseConfig):
                 f"Unsupported distillation.teacher.source={self.source!r}. "
                 "Supported values are 'ref_policy', 'current_policy', and 'reward_model'."
             )
-        if self.prompt_source not in {"actor_prompt", "data_teacher_prompt", "reward_model_gqm_out"}:
+        if self.prompt_source not in {"actor_prompt", "data_teacher_prompt", "reward_model"}:
             raise ValueError(
                 f"Unsupported distillation.teacher.prompt_source={self.prompt_source!r}. "
-                "Supported values are 'actor_prompt', 'data_teacher_prompt', and 'reward_model_gqm_out'."
+                "Supported values are 'actor_prompt', 'data_teacher_prompt', and 'reward_model'."
             )
 
 

@@ -9,11 +9,11 @@ from tensordict import TensorDict
 from verl import DataProto
 from verl.interactions.gqm_post_edit_interaction import GQM_POST_EDIT_PROMPT
 from verl.trainer.ppo.opsd_utils import (
-    GENRM_GQM_PROMPTS_KEY,
-    GENRM_GQM_OUTPUTS_KEY,
+    REWARD_MODEL_PROMPTS_KEY,
+    REWARD_MODEL_RESPONSES_KEY,
     OPSD_TEACHER_PROMPT_KEY,
     attach_opsd_metadata,
-    build_reward_model_gqm_teacher_batch,
+    build_reward_model_teacher_batch,
     build_opsd_teacher_batch,
     extract_opsd_teacher_prompt,
 )
@@ -58,6 +58,8 @@ def _config(prompt_path="extra_info.teacher_prompt"):
                 "teacher": {
                     "prompt_source": "data_teacher_prompt",
                     "teacher_prompt_path": prompt_path,
+                    "prompt_constructor_path": "reward_utils/prompts.py",
+                    "prompt_constructor_name": "gqm_post_edit_teacher_prompt_constructor",
                 }
             },
             "data": {
@@ -154,17 +156,17 @@ def test_build_teacher_batch_renders_chat_list_prompts():
     assert tokenizer.texts == ["Problem A\nAssistant:", "Problem B\nAssistant:"]
 
 
-def test_build_reward_model_gqm_teacher_batch_uses_online_gqm_outputs():
+def test_build_reward_model_teacher_batch_uses_online_gqm_outputs():
     batch = _batch()
-    batch.non_tensor_batch[GENRM_GQM_PROMPTS_KEY] = np.array(
+    batch.non_tensor_batch[REWARD_MODEL_PROMPTS_KEY] = np.array(
         [{"prompt_token_ids": [1, 2, 3]}, {"prompt_token_ids": [4, 5, 6]}], dtype=object
     )
-    batch.non_tensor_batch[GENRM_GQM_OUTPUTS_KEY] = np.array(
+    batch.non_tensor_batch[REWARD_MODEL_RESPONSES_KEY] = np.array(
         ["GQM analysis A\nScore: 80", "GQM analysis B\nScore: 70"], dtype=object
     )
     tokenizer = FakeTokenizer()
 
-    teacher_batch = build_reward_model_gqm_teacher_batch(batch, tokenizer, _config())
+    teacher_batch = build_reward_model_teacher_batch(batch, tokenizer, _config())
 
     assert torch.equal(teacher_batch.batch["responses"], batch.batch["responses"])
     assert torch.equal(teacher_batch.batch["response_mask"], batch.batch["response_mask"])

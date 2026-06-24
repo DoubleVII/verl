@@ -2119,19 +2119,23 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
 
         with simple_timer("generate_rewards", timing_generate):
             generate_fn = self.rollout.generate_for_rm
-            collect_gqm_outputs = data.meta_info.get("collect_genrm_gqm_outputs", False)
-            had_return_gqm_outputs = hasattr(self.custom_processor, "return_gqm_outputs")
-            old_return_gqm_outputs = getattr(self.custom_processor, "return_gqm_outputs", None)
-            if collect_gqm_outputs and had_return_gqm_outputs:
-                self.custom_processor.return_gqm_outputs = True
+            collect_reward_model_metadata = data.meta_info.get("collect_reward_model_metadata", False)
+            metadata_attr = None
+            if hasattr(self.custom_processor, "return_reward_model_metadata"):
+                metadata_attr = "return_reward_model_metadata"
+            elif hasattr(self.custom_processor, "return_gqm_outputs"):
+                metadata_attr = "return_gqm_outputs"
+            old_return_metadata = getattr(self.custom_processor, metadata_attr, None) if metadata_attr else None
+            if collect_reward_model_metadata and metadata_attr:
+                setattr(self.custom_processor, metadata_attr, True)
             try:
                 reward_result = self.custom_processor.compute_scores(
                     data,
                     generate_fn,
                 )
             finally:
-                if collect_gqm_outputs and had_return_gqm_outputs:
-                    self.custom_processor.return_gqm_outputs = old_return_gqm_outputs
+                if collect_reward_model_metadata and metadata_attr:
+                    setattr(self.custom_processor, metadata_attr, old_return_metadata)
 
         reward_metadata = getattr(reward_result, "non_tensor_batch", {})
         reward_scores = getattr(reward_result, "scores", reward_result)

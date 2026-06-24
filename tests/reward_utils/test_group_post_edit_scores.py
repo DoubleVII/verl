@@ -86,7 +86,7 @@ def test_default_mode_keeps_mt_group_advantage_without_reward_scale():
     assert scores == {0: pytest.approx((8 - (2 + 4) / 2) * 0.5)}
 
 
-def test_group_translation_scores_can_return_gqm_outputs_without_changing_scores():
+def test_group_translation_scores_can_return_reward_model_metadata_without_changing_scores():
     input_tokenizer = _Tokenizer(["candidate one", "candidate two"])
     tokenizer = _Tokenizer()
     data = _Data(
@@ -108,7 +108,7 @@ def test_group_translation_scores_can_return_gqm_outputs_without_changing_scores
         default_reward=-1.0,
         overlong_buffer_cfg=None,
         enable_language_detection=False,
-        return_gqm_outputs=True,
+        return_reward_model_metadata=True,
     )
 
     assert scores == {0: pytest.approx(1.0), 1: pytest.approx(4.0)}
