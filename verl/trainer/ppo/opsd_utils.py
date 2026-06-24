@@ -66,10 +66,7 @@ def build_opsd_teacher_batch(batch: DataProto, tokenizer: Any, config: Any) -> D
     prompt_attention_mask = prompt_attention_mask.to(device)
     responses = batch.batch["responses"]
     response_length = responses.size(-1)
-    response_attention_mask = batch.batch.get("response_mask", batch.batch["attention_mask"][:, -response_length:]).to(
-        device=device,
-        dtype=prompt_attention_mask.dtype,
-    )
+    response_attention_mask = batch.batch["attention_mask"][:, -response_length:].to(device)
 
     input_ids = torch.cat([prompt_ids, responses], dim=-1)
     attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=-1)
