@@ -29,7 +29,7 @@ class FakeTokenizer:
         return text
 
     def __call__(self, prompts, return_tensors="pt", padding=True, add_special_tokens=False):
-        self.texts = list(prompts)
+        self.texts.extend(list(prompts))
         encoded = [[ord(char) % 251 + 1 for char in prompt] for prompt in prompts]
         max_len = max(len(ids) for ids in encoded)
         input_ids = []
@@ -134,6 +134,22 @@ def test_build_teacher_batch_uses_response_mask_for_response_attention():
     teacher_batch = build_opsd_teacher_batch(batch, FakeTokenizer(), _config())
 
     assert torch.equal(teacher_batch.batch["attention_mask"][:, -2:], batch.batch["response_mask"])
+
+
+def test_build_teacher_batch_keeps_last_prompt_token_unpadded_for_varied_prompt_lengths():
+    batch = _batch(
+        extra_info=[
+            {"teacher_prompt": "short"},
+            {"teacher_prompt": "much longer teacher prompt"},
+        ]
+    )
+
+    attach_opsd_metadata(batch, _config())
+    teacher_batch = build_opsd_teacher_batch(batch, FakeTokenizer(), _config())
+
+    response_length = batch.batch["responses"].shape[-1]
+    last_prompt_attention = teacher_batch.batch["attention_mask"][:, -response_length - 1]
+    assert torch.all(last_prompt_attention == 1)
 
 
 def test_build_teacher_batch_renders_chat_list_prompts():

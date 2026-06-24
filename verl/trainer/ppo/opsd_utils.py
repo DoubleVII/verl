@@ -54,13 +54,10 @@ def build_opsd_teacher_batch(batch: DataProto, tokenizer: Any, config: Any) -> D
         for teacher_prompt in batch.non_tensor_batch[OPSD_TEACHER_PROMPT_KEY]
     ]
 
-    encoded = tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=False)
-    prompt_ids, prompt_attention_mask = postprocess_data(
-        input_ids=encoded["input_ids"],
-        attention_mask=encoded["attention_mask"],
+    prompt_ids, prompt_attention_mask = _tokenize_and_left_pad_prompts(
+        tokenizer=tokenizer,
+        prompts=prompts,
         max_length=int(_select(config, "data.max_prompt_length")),
-        pad_token_id=tokenizer.pad_token_id,
-        left_pad=True,
         truncation=str(_select(config, "data.truncation", "error")),
     )
 
@@ -104,6 +101,30 @@ def _render_teacher_prompt(teacher_prompt: Any, tokenizer: Any, apply_chat_templ
             **apply_chat_template_kwargs,
         )
     return str(teacher_prompt)
+
+
+def _tokenize_and_left_pad_prompts(
+    tokenizer: Any,
+    prompts: list[str],
+    max_length: int,
+    truncation: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    input_ids = []
+    attention_mask = []
+    for prompt in prompts:
+        encoded = tokenizer([prompt], return_tensors="pt", padding=False, add_special_tokens=False)
+        prompt_ids, prompt_attention_mask = postprocess_data(
+            input_ids=encoded["input_ids"],
+            attention_mask=encoded["attention_mask"],
+            max_length=max_length,
+            pad_token_id=tokenizer.pad_token_id,
+            left_pad=True,
+            truncation=truncation,
+        )
+        input_ids.append(prompt_ids.squeeze(0))
+        attention_mask.append(prompt_attention_mask.squeeze(0))
+
+    return torch.stack(input_ids, dim=0), torch.stack(attention_mask, dim=0)
 
 
 def _has_prompt_value(value: Any) -> bool:
