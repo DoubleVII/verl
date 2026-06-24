@@ -1998,6 +1998,7 @@ def _build_genrm_actor_compat_config(
         "strategy": strategy,
         "fsdp_config": OmegaConf.to_container(fsdp_cfg, resolve=False),
         "ppo_mini_batch_size": ppo_mini_batch_size,
+        "ppo_micro_batch_size": None,
         "ppo_micro_batch_size_per_gpu": 1,
         "use_dynamic_bsz": True,
         "ppo_max_token_len_per_gpu": ppo_max_token_len_per_gpu,
