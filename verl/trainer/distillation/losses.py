@@ -393,6 +393,7 @@ def compute_forward_kl_topk_distillation_loss_flat(
 
 def combine_policy_and_distillation_loss(policy_loss, distillation_loss, distillation_config):
     loss_config = distillation_config.distillation_loss
+    scaled_distillation_loss = distillation_loss * loss_config.distillation_loss_coef
     if not loss_config.use_task_rewards:
-        return distillation_loss
-    return policy_loss + distillation_loss * loss_config.distillation_loss_coef
+        return scaled_distillation_loss
+    return policy_loss + scaled_distillation_loss

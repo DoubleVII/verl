@@ -10,6 +10,7 @@ from hydra.core.global_hydra import GlobalHydra
 from verl.trainer.ppo.ray_trainer import Role
 from verl.trainer.main_ppo import TaskRunner
 from verl.trainer.distillation.losses import (
+    combine_policy_and_distillation_loss,
     compute_forward_kl_topk_distillation_loss,
     compute_forward_kl_topk_distillation_loss_flat,
     compute_sampled_distillation_loss,
@@ -208,6 +209,44 @@ def test_distillation_teacher_worker_mapping():
     runner.add_ref_policy_worker(ref_policy_cfg, DummyWorker)
     assert Role.RefPolicy in runner.role_worker_mapping
     assert runner.mapping[Role.RefPolicy] == "global_pool"
+
+
+def test_distillation_loss_coef_scales_pure_distillation_loss():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.distillation_loss.use_task_rewards=False",
+            "distillation.distillation_loss.distillation_loss_coef=0.25",
+        ]
+    )
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+
+    loss = combine_policy_and_distillation_loss(
+        policy_loss=torch.tensor(10.0),
+        distillation_loss=torch.tensor(4.0),
+        distillation_config=distillation_cfg,
+    )
+
+    assert loss.item() == pytest.approx(1.0)
+
+
+def test_distillation_loss_coef_scales_mixed_distillation_loss():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.distillation_loss.use_task_rewards=True",
+            "distillation.distillation_loss.distillation_loss_coef=0.25",
+        ]
+    )
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+
+    loss = combine_policy_and_distillation_loss(
+        policy_loss=torch.tensor(10.0),
+        distillation_loss=torch.tensor(4.0),
+        distillation_config=distillation_cfg,
+    )
+
+    assert loss.item() == pytest.approx(11.0)
 
 
 def test_sampled_k3_loss_is_finite_and_zero_for_identical_logprobs():
