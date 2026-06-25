@@ -14,6 +14,9 @@ teacher:
   ref_model_path: null
   prompt_source: actor_prompt
   teacher_prompt_path: extra_info.teacher_prompt
+  # Temperature used only when computing teacher logits/log probabilities for OPD.
+  # This is not a rollout sampling temperature; keep it > 0 even when rollout temperature is 0.
+  temperature: 1.0
   # Optional max length for teacher prompts. Defaults to data.max_prompt_length when null.
   max_prompt_length: null
   # When reward-model teacher prompts exceed max_prompt_length, truncate the constructed

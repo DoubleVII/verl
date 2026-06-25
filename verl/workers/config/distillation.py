@@ -28,6 +28,7 @@ class DistillationTeacherConfig(BaseConfig):
     ref_model_path: Optional[str] = None
     prompt_source: str = "actor_prompt"
     teacher_prompt_path: str = "extra_info.teacher_prompt"
+    temperature: float = 1.0
     max_prompt_length: Optional[int] = None
     response_truncation: str = "middle"
     prompt_constructor_path: Optional[str] = None
@@ -47,6 +48,8 @@ class DistillationTeacherConfig(BaseConfig):
             )
         if self.response_truncation not in {"left", "right", "middle"}:
             raise ValueError("distillation.teacher.response_truncation must be 'left', 'right', or 'middle'.")
+        if self.temperature <= 0:
+            raise ValueError("distillation.teacher.temperature must be greater than 0.")
 
 
 @dataclass

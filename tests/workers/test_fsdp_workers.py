@@ -474,10 +474,10 @@ def test_genrm_worker_distillation_teacher_wraps_actor_logprobs(monkeypatch):
                 "ppo_max_token_len_per_gpu": 16,
                 "use_dynamic_bsz": False,
             },
-            "rollout": {"temperature": 1.0},
+            "rollout": {"temperature": 0.0},
             "distillation": {
                 "enabled": True,
-                "teacher": {"source": "reward_model", "prompt_source": "reward_model"},
+                "teacher": {"source": "reward_model", "prompt_source": "reward_model", "temperature": 1.0},
                 "distillation_loss": {"loss_mode": "k3"},
             },
         }
@@ -491,3 +491,4 @@ def test_genrm_worker_distillation_teacher_wraps_actor_logprobs(monkeypatch):
     assert calculate_entropy is False
     assert compute_topk is False
     assert meta_info["micro_batch_size"] == 1
+    assert meta_info["temperature"] == 1.0

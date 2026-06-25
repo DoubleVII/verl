@@ -118,6 +118,18 @@ def test_reward_model_teacher_gqm_prompt_config_loads():
     distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
     assert distillation_cfg.teacher.source == "reward_model"
     assert distillation_cfg.teacher.prompt_source == "reward_model"
+    assert distillation_cfg.teacher.temperature == 1.0
+
+
+def test_distillation_teacher_rejects_non_positive_log_prob_temperature():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.temperature=0",
+        ]
+    )
+    with pytest.raises((InstantiationException, ValueError), match="temperature"):
+        omega_conf_to_dataclass(cfg.distillation)
 
 
 def test_reward_model_teacher_requires_gqm_prompt_source():

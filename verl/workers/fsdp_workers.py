@@ -2204,11 +2204,14 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         data.meta_info["micro_batch_size"] = self.config.actor.ppo_micro_batch_size_per_gpu
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        distillation_config = self.config.get("distillation", None)
+        teacher_temperature = float(distillation_config.teacher.get("temperature", 1.0)) if distillation_config else 1.0
+        if teacher_temperature <= 0:
+            raise ValueError("distillation.teacher.temperature must be greater than 0 for teacher log_prob forward.")
+        data.meta_info["temperature"] = teacher_temperature
         data.meta_info["max_token_len"] = self.config.actor.ppo_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.actor.use_dynamic_bsz
 
-        distillation_config = self.config.get("distillation", None)
         compute_topk = is_forward_kl_topk_enabled(distillation_config)
         with self.ulysses_sharding_manager:
             data = data.to("cpu")
