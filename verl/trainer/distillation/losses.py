@@ -31,8 +31,21 @@ def validate_distillation_config(config) -> None:
 
     teacher_source = distillation_config.teacher.source
     teacher_prompt_source = distillation_config.teacher.get("prompt_source", "actor_prompt")
+    teacher_response_source = distillation_config.teacher.get("response_source", "full_response")
     loss_mode = distillation_config.distillation_loss.loss_mode
     actor_strategy = config.actor_rollout_ref.actor.strategy
+    if teacher_response_source == "last_assistant_response":
+        if teacher_source != "ref_policy" or teacher_prompt_source != "data_teacher_prompt":
+            raise ValueError(
+                "distillation.teacher.response_source=last_assistant_response requires "
+                "distillation.teacher.source=ref_policy and "
+                "distillation.teacher.prompt_source=data_teacher_prompt."
+            )
+        if config.actor_rollout_ref.rollout.multi_turn.response_mask_mode != "last_assistant":
+            raise ValueError(
+                "distillation.teacher.response_source=last_assistant_response requires "
+                "actor_rollout_ref.rollout.multi_turn.response_mask_mode=last_assistant."
+            )
     if teacher_source == "reward_model":
         if teacher_prompt_source != "reward_model":
             raise ValueError(

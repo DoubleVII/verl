@@ -41,6 +41,7 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.config import AlgoConfig
+from verl.trainer.distillation.losses import is_distillation_enabled, is_forward_kl_topk_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -58,10 +59,10 @@ from verl.trainer.ppo.opsd_utils import (
     build_reward_model_teacher_batch,
     distillation_uses_data_teacher_prompt,
     distillation_uses_reward_model_prompt,
+    restore_selected_response_teacher_logprobs,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
-from verl.trainer.distillation.losses import is_distillation_enabled, is_forward_kl_topk_enabled
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -1336,6 +1337,9 @@ class RayPPOTrainer:
                                 teacher_input_batch = build_opsd_teacher_batch(batch, self.tokenizer, self.config)
                                 metrics["opsd/enabled"] = 1.0
                             teacher_logprobs = self.ref_policy_wg.compute_ref_log_prob(teacher_input_batch)
+                            teacher_logprobs = restore_selected_response_teacher_logprobs(
+                                teacher_logprobs, teacher_input_batch
+                            )
                             if not self.distillation_forward_kl_topk:
                                 teacher_logprobs.batch["teacher_logprobs"] = teacher_logprobs.batch.pop("ref_log_prob")
                             elif "ref_log_prob" in teacher_logprobs.batch:

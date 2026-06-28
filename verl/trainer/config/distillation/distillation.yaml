@@ -14,6 +14,10 @@ teacher:
   ref_model_path: null
   prompt_source: actor_prompt
   teacher_prompt_path: extra_info.teacher_prompt
+  # full_response preserves the full rollout response in teacher forward.
+  # last_assistant_response is supported only with ref_policy + data_teacher_prompt
+  # and rollout.multi_turn.response_mask_mode=last_assistant.
+  response_source: full_response
   # Temperature used only when computing teacher logits/log probabilities for OPD.
   # This is not a rollout sampling temperature; keep it > 0 even when rollout temperature is 0.
   temperature: 1.0

@@ -10,13 +10,16 @@ from verl import DataProto
 from verl.interactions.gqm_post_edit_interaction import GQM_POST_EDIT_PROMPT
 from verl.trainer.ppo.opsd_utils import (
     DISTILLATION_LOSS_MASK_KEY,
+    OPSD_TEACHER_PROMPT_KEY,
+    ORIGINAL_RESPONSE_MASK_KEY,
     REWARD_MODEL_PROMPTS_KEY,
     REWARD_MODEL_RESPONSES_KEY,
-    OPSD_TEACHER_PROMPT_KEY,
+    SELECTED_RESPONSE_MASK_KEY,
     attach_opsd_metadata,
-    build_reward_model_teacher_batch,
     build_opsd_teacher_batch,
+    build_reward_model_teacher_batch,
     extract_opsd_teacher_prompt,
+    restore_selected_response_teacher_logprobs,
 )
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
@@ -54,15 +57,28 @@ class FakeTokenizer:
         return "".join(chr(token_id) for token_id in token_ids if token_id != self.pad_token_id)
 
 
-def _config(prompt_path="extra_info.teacher_prompt", teacher_max_prompt_length=None):
+def _config(
+    prompt_path="extra_info.teacher_prompt",
+    teacher_max_prompt_length=None,
+    response_source="full_response",
+):
     config = OmegaConf.create(
         {
             "distillation": {
                 "teacher": {
+                    "source": "ref_policy",
                     "prompt_source": "data_teacher_prompt",
                     "teacher_prompt_path": prompt_path,
+                    "response_source": response_source,
                     "prompt_constructor_path": "reward_utils/prompts.py",
                     "prompt_constructor_name": "gqm_post_edit_teacher_prompt_constructor",
+                }
+            },
+            "actor_rollout_ref": {
+                "rollout": {
+                    "multi_turn": {
+                        "response_mask_mode": "last_assistant",
+                    }
                 }
             },
             "data": {
@@ -160,6 +176,86 @@ def test_build_teacher_batch_renders_chat_list_prompts():
     build_opsd_teacher_batch(batch, tokenizer, _config())
 
     assert tokenizer.texts == ["Problem A\nAssistant:", "Problem B\nAssistant:"]
+
+
+def test_build_teacher_batch_can_select_last_assistant_responses_only():
+    batch = _batch(
+        extra_info=[
+            {"teacher_prompt": "Full teacher prompt A"},
+            {"teacher_prompt": "Full teacher prompt B"},
+        ]
+    )
+    batch.batch["responses"] = torch.tensor([[31, 32, 41, 42], [33, 43, 44, 0]])
+    batch.batch["response_mask"] = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 0]])
+    batch.batch["attention_mask"] = torch.tensor(
+        [[0, 0, 1, 1, 1, 1, 1, 1, 1], [0, 1, 1, 1, 1, 1, 1, 1, 0]]
+    )
+    batch.meta_info["pad_token_id"] = 0
+    config = _config(response_source="last_assistant_response")
+
+    attach_opsd_metadata(batch, config)
+    teacher_batch = build_opsd_teacher_batch(batch, FakeTokenizer(), config)
+
+    assert torch.equal(teacher_batch.batch["responses"], torch.tensor([[41, 42], [43, 44]]))
+    assert torch.equal(teacher_batch.batch["response_mask"], torch.ones(2, 2, dtype=torch.long))
+    assert torch.equal(teacher_batch.batch[SELECTED_RESPONSE_MASK_KEY], torch.ones(2, 2, dtype=torch.long))
+    assert torch.equal(teacher_batch.batch[ORIGINAL_RESPONSE_MASK_KEY], batch.batch["response_mask"])
+    assert torch.equal(teacher_batch.batch["input_ids"][:, -2:], torch.tensor([[41, 42], [43, 44]]))
+
+
+def test_build_teacher_batch_rejects_last_assistant_response_without_last_assistant_mask_mode():
+    batch = _batch(extra_info=[{"teacher_prompt": "A"}, {"teacher_prompt": "B"}])
+    config = _config(response_source="last_assistant_response")
+    config.actor_rollout_ref.rollout.multi_turn.response_mask_mode = "all_assistant"
+
+    attach_opsd_metadata(batch, config)
+    with pytest.raises(ValueError, match="response_mask_mode=last_assistant"):
+        build_opsd_teacher_batch(batch, FakeTokenizer(), config)
+
+
+def test_build_teacher_batch_rejects_empty_selected_last_assistant_response():
+    batch = _batch(extra_info=[{"teacher_prompt": "A"}, {"teacher_prompt": "B"}])
+    batch.batch["response_mask"] = torch.tensor([[1, 1], [0, 0]])
+    config = _config(response_source="last_assistant_response")
+
+    attach_opsd_metadata(batch, config)
+    with pytest.raises(ValueError, match="selected an empty response"):
+        build_opsd_teacher_batch(batch, FakeTokenizer(), config)
+
+
+def test_restore_selected_response_teacher_logprobs_to_original_response_shape():
+    batch = _batch(extra_info=[{"teacher_prompt": "A"}, {"teacher_prompt": "B"}])
+    batch.batch["responses"] = torch.tensor([[31, 32, 41, 42], [33, 43, 44, 0]])
+    batch.batch["response_mask"] = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 0]])
+    batch.batch["attention_mask"] = torch.tensor(
+        [[0, 0, 1, 1, 1, 1, 1, 1, 1], [0, 1, 1, 1, 1, 1, 1, 1, 0]]
+    )
+    config = _config(response_source="last_assistant_response")
+
+    attach_opsd_metadata(batch, config)
+    teacher_input_batch = build_opsd_teacher_batch(batch, FakeTokenizer(), config)
+    teacher_output = DataProto.from_dict(
+        tensors={
+            "ref_log_prob": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+            "teacher_logprobs": torch.tensor([[[1.0], [2.0]], [[3.0], [4.0]]]),
+            "teacher_ids": torch.tensor([[[11], [12]], [[13], [14]]]),
+        }
+    )
+
+    restored = restore_selected_response_teacher_logprobs(teacher_output, teacher_input_batch)
+
+    assert torch.equal(
+        restored.batch["ref_log_prob"],
+        torch.tensor([[0.0, 0.0, 1.0, 2.0], [0.0, 3.0, 4.0, 0.0]]),
+    )
+    assert torch.equal(
+        restored.batch["teacher_logprobs"],
+        torch.tensor([[[0.0], [0.0], [1.0], [2.0]], [[0.0], [3.0], [4.0], [0.0]]]),
+    )
+    assert torch.equal(
+        restored.batch["teacher_ids"],
+        torch.tensor([[[0], [0], [11], [12]], [[0], [13], [14], [0]]]),
+    )
 
 
 def test_build_reward_model_teacher_batch_uses_online_gqm_outputs():

@@ -11,11 +11,12 @@ from verl import DataProto
 from verl.utils.import_utils import load_extern_type
 from verl.utils.torch_functional import postprocess_data
 
-
 OPSD_TEACHER_PROMPT_KEY = "opsd_teacher_prompt"
 REWARD_MODEL_PROMPTS_KEY = "reward_model_prompts"
 REWARD_MODEL_RESPONSES_KEY = "reward_model_responses"
 DISTILLATION_LOSS_MASK_KEY = "distillation_loss_mask"
+SELECTED_RESPONSE_MASK_KEY = "selected_response_mask"
+ORIGINAL_RESPONSE_MASK_KEY = "original_response_mask"
 
 
 def distillation_uses_data_teacher_prompt(config: Any) -> bool:
@@ -56,7 +57,21 @@ def build_opsd_teacher_batch(batch: DataProto, tokenizer: Any, config: Any) -> D
     if OPSD_TEACHER_PROMPT_KEY not in batch.non_tensor_batch:
         raise ValueError("OPSD metadata is missing from rollout batch")
 
-    return _build_teacher_batch_from_prompts(batch, tokenizer, config, batch.non_tensor_batch[OPSD_TEACHER_PROMPT_KEY])
+    selected_responses = None
+    selected_response_mask = None
+    if _teacher_response_source(config) == "last_assistant_response":
+        _validate_last_assistant_response_source(config)
+        selected_responses, selected_response_mask = _select_masked_responses(batch)
+
+    return _build_teacher_batch_from_prompts(
+        batch,
+        tokenizer,
+        config,
+        batch.non_tensor_batch[OPSD_TEACHER_PROMPT_KEY],
+        responses=selected_responses,
+        response_mask=selected_response_mask,
+        selected_response_mask=selected_response_mask,
+    )
 
 
 def build_reward_model_teacher_batch(batch: DataProto, tokenizer: Any, config: Any) -> DataProto:
@@ -228,6 +243,9 @@ def _build_teacher_batch_from_prompts(
     tokenizer: Any,
     config: Any,
     teacher_prompts: list[Any],
+    responses: torch.Tensor | None = None,
+    response_mask: torch.Tensor | None = None,
+    selected_response_mask: torch.Tensor | None = None,
 ) -> DataProto:
     apply_chat_template_kwargs = _select(config, "data.apply_chat_template_kwargs", {}) or {}
     prompts = [
@@ -245,9 +263,12 @@ def _build_teacher_batch_from_prompts(
     device = batch.batch["responses"].device
     prompt_ids = prompt_ids.to(device)
     prompt_attention_mask = prompt_attention_mask.to(device)
-    responses = batch.batch["responses"]
+    responses = batch.batch["responses"] if responses is None else responses
     response_length = responses.size(-1)
-    response_attention_mask = batch.batch["attention_mask"][:, -response_length:].to(device)
+    if response_mask is None:
+        response_attention_mask = batch.batch["attention_mask"][:, -response_length:].to(device)
+    else:
+        response_attention_mask = response_mask.to(device)
 
     input_ids = torch.cat([prompt_ids, responses], dim=-1)
     attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=-1)
@@ -258,7 +279,109 @@ def _build_teacher_batch_from_prompts(
     teacher_batch.batch["input_ids"] = input_ids
     teacher_batch.batch["attention_mask"] = attention_mask
     teacher_batch.batch["position_ids"] = position_ids
+    teacher_batch.batch["responses"] = responses
+    teacher_batch.batch["response_mask"] = response_attention_mask
+    if selected_response_mask is not None:
+        teacher_batch.batch[SELECTED_RESPONSE_MASK_KEY] = selected_response_mask.to(device)
+        teacher_batch.batch[ORIGINAL_RESPONSE_MASK_KEY] = batch.batch["response_mask"].to(device)
     return teacher_batch
+
+
+def restore_selected_response_teacher_logprobs(
+    teacher_logprobs: DataProto,
+    teacher_input_batch: DataProto,
+) -> DataProto:
+    """Restore teacher outputs from selected response length to the original rollout response length."""
+    if SELECTED_RESPONSE_MASK_KEY not in teacher_input_batch.batch:
+        return teacher_logprobs
+
+    selected_response_mask = teacher_input_batch.batch[SELECTED_RESPONSE_MASK_KEY]
+    original_response_mask = teacher_input_batch.batch.get(ORIGINAL_RESPONSE_MASK_KEY)
+    if original_response_mask is None:
+        raise ValueError("Selected-response teacher batch is missing original_response_mask.")
+
+    selected_response_mask = selected_response_mask.to(torch.bool)
+    original_response_mask = original_response_mask.to(torch.bool)
+    if selected_response_mask.sum().item() != original_response_mask.sum().item():
+        raise ValueError("Selected-response teacher output cannot be restored because token counts differ.")
+
+    restored_tensors = {}
+    for key, value in teacher_logprobs.batch.items():
+        if key not in {"ref_log_prob", "teacher_logprobs", "teacher_ids"}:
+            restored_tensors[key] = value
+            continue
+        restored_tensors[key] = _restore_selected_response_tensor(
+            value,
+            selected_response_mask.to(value.device),
+            original_response_mask.to(value.device),
+        )
+
+    return DataProto.from_dict(tensors=restored_tensors, meta_info=teacher_logprobs.meta_info)
+
+
+def _restore_selected_response_tensor(
+    tensor: torch.Tensor,
+    selected_response_mask: torch.Tensor,
+    original_response_mask: torch.Tensor,
+) -> torch.Tensor:
+    restored_shape = (original_response_mask.shape[0], original_response_mask.shape[1], *tensor.shape[2:])
+    restored = torch.zeros(restored_shape, dtype=tensor.dtype, device=tensor.device)
+    restored[original_response_mask] = tensor[selected_response_mask]
+    return restored
+
+
+def _select_masked_responses(batch: DataProto) -> tuple[torch.Tensor, torch.Tensor]:
+    if "response_mask" not in batch.batch:
+        raise ValueError("distillation.teacher.response_source=last_assistant_response requires response_mask.")
+
+    responses = batch.batch["responses"]
+    response_mask = batch.batch["response_mask"].to(torch.bool)
+    selected_lengths = response_mask.sum(dim=-1)
+    if torch.any(selected_lengths == 0):
+        raise ValueError("distillation.teacher.response_source=last_assistant_response selected an empty response.")
+
+    max_selected_length = int(selected_lengths.max().item())
+    selected_responses = responses.new_full(
+        (responses.shape[0], max_selected_length),
+        _select_pad_token_id(batch),
+    )
+    selected_response_mask = response_mask.new_zeros(
+        (responses.shape[0], max_selected_length),
+        dtype=batch.batch["response_mask"].dtype,
+    )
+    for index, length in enumerate(selected_lengths.tolist()):
+        selected_tokens = responses[index][response_mask[index]]
+        selected_responses[index, :length] = selected_tokens
+        selected_response_mask[index, :length] = 1
+    return selected_responses, selected_response_mask
+
+
+def _select_pad_token_id(batch: DataProto) -> int:
+    if "pad_token_id" in batch.meta_info:
+        return int(batch.meta_info["pad_token_id"])
+    return 0
+
+
+def _teacher_response_source(config: Any) -> str:
+    return str(_select(config, "distillation.teacher.response_source", "full_response"))
+
+
+def _validate_last_assistant_response_source(config: Any) -> None:
+    if _select(config, "distillation.teacher.source", "ref_policy") != "ref_policy":
+        raise ValueError(
+            "distillation.teacher.response_source=last_assistant_response requires "
+            "distillation.teacher.source=ref_policy."
+        )
+    if _select(config, "distillation.teacher.prompt_source", "actor_prompt") != "data_teacher_prompt":
+        raise ValueError(
+            "distillation.teacher.response_source=last_assistant_response requires "
+            "distillation.teacher.prompt_source=data_teacher_prompt."
+        )
+    if _select(config, "actor_rollout_ref.rollout.multi_turn.response_mask_mode", None) != "last_assistant":
+        raise ValueError(
+            "distillation.teacher.response_source=last_assistant_response requires "
+            "actor_rollout_ref.rollout.multi_turn.response_mask_mode=last_assistant."
+        )
 
 
 def _tokenize_and_left_pad_prompts(

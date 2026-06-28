@@ -3,12 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from hydra.errors import InstantiationException
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
+from hydra.errors import InstantiationException
 
-from verl.trainer.ppo.ray_trainer import Role
-from verl.trainer.main_ppo import TaskRunner
 from verl.trainer.distillation.losses import (
     combine_policy_and_distillation_loss,
     compute_forward_kl_topk_distillation_loss,
@@ -18,6 +16,8 @@ from verl.trainer.distillation.losses import (
     compute_topk_logprobs_from_logits,
     validate_distillation_config,
 )
+from verl.trainer.main_ppo import TaskRunner
+from verl.trainer.ppo.ray_trainer import Role
 from verl.utils.config import omega_conf_to_dataclass
 
 
@@ -49,6 +49,55 @@ def test_data_teacher_prompt_ref_policy_config_loads():
     distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
     assert distillation_cfg.teacher.prompt_source == "data_teacher_prompt"
     assert distillation_cfg.teacher.teacher_prompt_path == "extra_info.teacher_prompt"
+    assert distillation_cfg.teacher.response_source == "full_response"
+
+
+def test_data_teacher_prompt_last_assistant_response_config_loads():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=ref_policy",
+            "distillation.teacher.prompt_source=data_teacher_prompt",
+            "distillation.teacher.response_source=last_assistant_response",
+            "actor_rollout_ref.rollout.multi_turn.response_mask_mode=last_assistant",
+        ]
+    )
+    validate_distillation_config(cfg)
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+    assert distillation_cfg.teacher.response_source == "last_assistant_response"
+
+
+def test_last_assistant_response_rejects_all_assistant_response_mask_mode():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=ref_policy",
+            "distillation.teacher.prompt_source=data_teacher_prompt",
+            "distillation.teacher.response_source=last_assistant_response",
+            "actor_rollout_ref.rollout.multi_turn.response_mask_mode=all_assistant",
+        ]
+    )
+    with pytest.raises(ValueError, match="response_mask_mode=last_assistant"):
+        validate_distillation_config(cfg)
+
+
+def test_last_assistant_response_rejects_reward_model_teacher_prompt():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=reward_model",
+            "distillation.teacher.prompt_source=reward_model",
+            "distillation.teacher.response_source=last_assistant_response",
+            "distillation.teacher.prompt_constructor_path=reward_utils/prompts.py",
+            "distillation.teacher.prompt_constructor_name=gqm_post_edit_teacher_prompt_constructor",
+            "reward_model.enable=True",
+            "reward_model.strategy=GenRM",
+            "reward_model.genrm_engine_mode=hybrid",
+            "actor_rollout_ref.rollout.multi_turn.response_mask_mode=last_assistant",
+        ]
+    )
+    with pytest.raises(ValueError, match="source=ref_policy"):
+        validate_distillation_config(cfg)
 
 
 def test_data_teacher_prompt_rejects_current_policy():

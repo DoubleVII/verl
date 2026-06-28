@@ -28,6 +28,7 @@ class DistillationTeacherConfig(BaseConfig):
     ref_model_path: Optional[str] = None
     prompt_source: str = "actor_prompt"
     teacher_prompt_path: str = "extra_info.teacher_prompt"
+    response_source: str = "full_response"
     temperature: float = 1.0
     max_prompt_length: Optional[int] = None
     response_truncation: str = "middle"
@@ -45,6 +46,11 @@ class DistillationTeacherConfig(BaseConfig):
             raise ValueError(
                 f"Unsupported distillation.teacher.prompt_source={self.prompt_source!r}. "
                 "Supported values are 'actor_prompt', 'data_teacher_prompt', and 'reward_model'."
+            )
+        if self.response_source not in {"full_response", "last_assistant_response"}:
+            raise ValueError(
+                f"Unsupported distillation.teacher.response_source={self.response_source!r}. "
+                "Supported values are 'full_response' and 'last_assistant_response'."
             )
         if self.response_truncation not in {"left", "right", "middle"}:
             raise ValueError("distillation.teacher.response_truncation must be 'left', 'right', or 'middle'.")

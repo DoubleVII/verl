@@ -456,6 +456,39 @@ reward_model:
     save_path: ${oc.select:global_profiler.save_path,null}
     tool_config: ${oc.select:actor_rollout_ref.actor.profiler.tool_config,null}
   ulysses_sequence_parallel_size: 1
+distillation:
+  _target_: verl.workers.config.DistillationConfig
+  enabled: false
+  teacher:
+    _target_: verl.workers.config.DistillationTeacherConfig
+    source: ref_policy
+    ref_model_path: null
+    prompt_source: actor_prompt
+    teacher_prompt_path: extra_info.teacher_prompt
+    response_source: full_response
+    temperature: 1.0
+    max_prompt_length: null
+    response_truncation: middle
+    prompt_constructor_path: null
+    prompt_constructor_name: null
+    prompt_constructor_kwargs: {}
+  distillation_loss:
+    _target_: verl.workers.config.DistillationLossConfig
+    loss_mode: k3
+    topk: 32
+    use_task_rewards: true
+    distillation_loss_coef: 1.0
+    loss_max_clamp: null
+    log_prob_min_clamp: null
+    use_policy_gradient: false
+    policy_loss_mode: vanilla
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+    topk_kl_mode: forward
+    norm_to_one_for_kl: false
+    use_chunked_topk: true
+    chunked_topk_chunk_size: 4096
 custom_reward_function:
   path: null
   name: compute_score
