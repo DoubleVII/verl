@@ -982,7 +982,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         with self.ulysses_sharding_manager:
             with adapter_ctx:
                 distillation_config = self.config.get("distillation", None)
-                compute_topk = (
+                compute_topk = bool(data.meta_info.pop("compute_distillation_teacher_topk", False)) and (
                     is_forward_kl_topk_enabled(distillation_config)
                     and distillation_config.teacher.source == "current_policy"
                 )
