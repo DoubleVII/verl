@@ -245,3 +245,73 @@ def test_get_gen_batch_keeps_opsd_metadata_on_training_batch():
 
     assert OPSD_TEACHER_PROMPT_KEY in batch.non_tensor_batch
     assert OPSD_TEACHER_PROMPT_KEY not in gen_batch.non_tensor_batch
+
+
+def test_current_policy_teacher_logprobs_use_data_teacher_prompt():
+    class FakeActorRolloutWG:
+        def __init__(self):
+            self.seen_batch = None
+
+        def compute_log_prob(self, batch):
+            self.seen_batch = batch
+            return DataProto.from_dict(
+                tensors={
+                    "old_log_probs": torch.full_like(batch.batch["responses"], -3.0, dtype=torch.float),
+                    "entropys": torch.ones_like(batch.batch["responses"], dtype=torch.float),
+                }
+            )
+
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.tokenizer = FakeTokenizer()
+    trainer.config = _config()
+    trainer.distillation_forward_kl_topk = False
+    trainer.actor_rollout_wg = FakeActorRolloutWG()
+    batch = _batch(
+        extra_info=[
+            {"teacher_prompt": "Full teacher prompt A"},
+            {"teacher_prompt": "Full teacher prompt B"},
+        ]
+    )
+
+    attach_opsd_metadata(batch, _config())
+    teacher_logprobs = trainer._compute_current_policy_teacher_logprobs(batch)
+
+    assert "old_log_probs" not in teacher_logprobs.batch
+    assert "entropys" not in teacher_logprobs.batch
+    assert torch.all(teacher_logprobs.batch["teacher_logprobs"] == -3.0)
+    seen_batch = trainer.actor_rollout_wg.seen_batch
+    assert seen_batch.meta_info["compute_distillation_teacher_topk"] is False
+    assert not torch.equal(seen_batch.batch["prompts"], batch.batch["prompts"])
+
+
+def test_current_policy_teacher_topk_keeps_teacher_outputs_only():
+    class FakeActorRolloutWG:
+        def compute_log_prob(self, batch):
+            return DataProto.from_dict(
+                tensors={
+                    "old_log_probs": torch.full_like(batch.batch["responses"], -9.0, dtype=torch.float),
+                    "entropys": torch.ones_like(batch.batch["responses"], dtype=torch.float),
+                    "teacher_logprobs": torch.full((*batch.batch["responses"].shape, 2), -4.0),
+                    "teacher_ids": torch.ones((*batch.batch["responses"].shape, 2), dtype=torch.long),
+                }
+            )
+
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.tokenizer = FakeTokenizer()
+    trainer.config = _config()
+    trainer.distillation_forward_kl_topk = True
+    trainer.actor_rollout_wg = FakeActorRolloutWG()
+    batch = _batch(
+        extra_info=[
+            {"teacher_prompt": "Full teacher prompt A"},
+            {"teacher_prompt": "Full teacher prompt B"},
+        ]
+    )
+
+    attach_opsd_metadata(batch, _config())
+    teacher_logprobs = trainer._compute_current_policy_teacher_logprobs(batch)
+
+    assert "old_log_probs" not in teacher_logprobs.batch
+    assert "entropys" not in teacher_logprobs.batch
+    assert torch.all(teacher_logprobs.batch["teacher_logprobs"] == -4.0)
+    assert torch.all(teacher_logprobs.batch["teacher_ids"] == 1)

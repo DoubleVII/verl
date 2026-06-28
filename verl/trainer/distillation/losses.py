@@ -62,10 +62,11 @@ def validate_distillation_config(config) -> None:
             "distillation.teacher.prompt_source=reward_model requires "
             "distillation.teacher.source=reward_model."
         )
-    if teacher_prompt_source == "data_teacher_prompt" and teacher_source != "ref_policy":
+    if teacher_source == "current_policy" and teacher_prompt_source == "actor_prompt":
         raise NotImplementedError(
-            "distillation.teacher.prompt_source=data_teacher_prompt currently supports "
-            "distillation.teacher.source=ref_policy only."
+            "distillation.teacher.source=current_policy does not provide an independent teacher with "
+            "distillation.teacher.prompt_source=actor_prompt. Use prompt_source=data_teacher_prompt "
+            "or teacher.source=ref_policy."
         )
     if loss_mode == "forward_kl_topk":
         if actor_strategy not in {"fsdp", "fsdp2"}:

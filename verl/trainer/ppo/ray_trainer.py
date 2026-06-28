@@ -1136,6 +1136,19 @@ class RayPPOTrainer:
         # Return unchanged batch and empty metrics if IS is disabled
         return batch, {}
 
+    def _compute_current_policy_teacher_logprobs(self, batch: DataProto) -> DataProto:
+        """Compute distillation teacher outputs from current actor on data teacher prompts."""
+        teacher_input_batch = build_opsd_teacher_batch(batch, self.tokenizer, self.config)
+        teacher_input_batch.meta_info["compute_distillation_teacher_topk"] = self.distillation_forward_kl_topk
+        teacher_logprobs = self.actor_rollout_wg.compute_log_prob(teacher_input_batch)
+        if "entropys" in teacher_logprobs.batch:
+            teacher_logprobs.batch.pop("entropys")
+        if not self.distillation_forward_kl_topk:
+            teacher_logprobs.batch["teacher_logprobs"] = teacher_logprobs.batch.pop("old_log_probs")
+        elif "old_log_probs" in teacher_logprobs.batch:
+            teacher_logprobs.batch.pop("old_log_probs")
+        return teacher_logprobs
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1305,6 +1318,8 @@ class RayPPOTrainer:
                         old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
                         metrics.update(old_log_prob_metrics)
                         old_log_prob.batch.pop("entropys")
+                        old_log_prob.batch.pop("teacher_logprobs", None)
+                        old_log_prob.batch.pop("teacher_ids", None)
                         batch = batch.union(old_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
@@ -1312,13 +1327,6 @@ class RayPPOTrainer:
                             from verl.utils.debug.metrics import calculate_debug_metrics
 
                             metrics.update(calculate_debug_metrics(batch))
-
-                    if (
-                        self.use_distillation
-                        and self.distillation_teacher_source == "current_policy"
-                        and not self.distillation_forward_kl_topk
-                    ):
-                        batch.batch["teacher_logprobs"] = batch.batch["old_log_probs"].clone()
 
                     if self.use_ppo_reference_policy:
                         # compute reference log_prob
@@ -1328,6 +1336,12 @@ class RayPPOTrainer:
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+
+                    if self.use_distillation and self.distillation_teacher_source == "current_policy":
+                        with marked_timer("distillation_teacher", timing_raw, color="olive"):
+                            teacher_logprobs = self._compute_current_policy_teacher_logprobs(batch)
+                            metrics["opsd/enabled"] = 1.0
+                            batch = batch.union(teacher_logprobs)
 
                     if self.use_distillation and self.distillation_teacher_source == "ref_policy":
                         with marked_timer("distillation_teacher", timing_raw, color="olive"):

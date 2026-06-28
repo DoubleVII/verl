@@ -51,7 +51,18 @@ def test_data_teacher_prompt_ref_policy_config_loads():
     assert distillation_cfg.teacher.teacher_prompt_path == "extra_info.teacher_prompt"
 
 
-def test_data_teacher_prompt_rejects_current_policy():
+def test_current_policy_actor_prompt_is_rejected():
+    cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=current_policy",
+        ]
+    )
+    with pytest.raises(NotImplementedError, match="prompt_source=data_teacher_prompt"):
+        validate_distillation_config(cfg)
+
+
+def test_data_teacher_prompt_current_policy_config_loads():
     cfg = _compose_ppo(
         [
             "distillation.enabled=True",
@@ -59,8 +70,10 @@ def test_data_teacher_prompt_rejects_current_policy():
             "distillation.teacher.prompt_source=data_teacher_prompt",
         ]
     )
-    with pytest.raises(NotImplementedError, match="ref_policy only"):
-        validate_distillation_config(cfg)
+    validate_distillation_config(cfg)
+    distillation_cfg = omega_conf_to_dataclass(cfg.distillation)
+    assert distillation_cfg.teacher.source == "current_policy"
+    assert distillation_cfg.teacher.prompt_source == "data_teacher_prompt"
 
 
 def test_forward_kl_topk_data_teacher_prompt_ref_policy_config_loads():
@@ -199,7 +212,13 @@ def test_distillation_teacher_worker_mapping():
     class DummyWorker:
         pass
 
-    current_policy_cfg = _compose_ppo(["distillation.enabled=True", "distillation.teacher.source=current_policy"])
+    current_policy_cfg = _compose_ppo(
+        [
+            "distillation.enabled=True",
+            "distillation.teacher.source=current_policy",
+            "distillation.teacher.prompt_source=data_teacher_prompt",
+        ]
+    )
     runner = TaskRunner()
     runner.add_ref_policy_worker(current_policy_cfg, DummyWorker)
     assert Role.RefPolicy not in runner.role_worker_mapping
@@ -288,6 +307,7 @@ def test_forward_kl_topk_config_loads_for_fsdp():
         [
             "distillation.enabled=True",
             "distillation.teacher.source=current_policy",
+            "distillation.teacher.prompt_source=data_teacher_prompt",
             "distillation.distillation_loss.loss_mode=forward_kl_topk",
             "distillation.distillation_loss.topk=4",
         ]
@@ -302,6 +322,7 @@ def test_forward_kl_topk_reverse_config_loads_for_fsdp():
         [
             "distillation.enabled=True",
             "distillation.teacher.source=current_policy",
+            "distillation.teacher.prompt_source=data_teacher_prompt",
             "distillation.distillation_loss.loss_mode=forward_kl_topk",
             "distillation.distillation_loss.topk=4",
             "distillation.distillation_loss.topk_kl_mode=reverse",
@@ -317,6 +338,7 @@ def test_forward_kl_topk_norm_to_one_config_loads_for_fsdp():
         [
             "distillation.enabled=True",
             "distillation.teacher.source=current_policy",
+            "distillation.teacher.prompt_source=data_teacher_prompt",
             "distillation.distillation_loss.loss_mode=forward_kl_topk",
             "distillation.distillation_loss.topk=4",
             "distillation.distillation_loss.norm_to_one_for_kl=True",
