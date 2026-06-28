@@ -337,10 +337,7 @@ def _select_masked_responses(batch: DataProto) -> tuple[torch.Tensor, torch.Tens
     responses = batch.batch["responses"]
     response_mask = batch.batch["response_mask"].to(torch.bool)
     selected_lengths = response_mask.sum(dim=-1)
-    if torch.any(selected_lengths == 0):
-        raise ValueError("distillation.teacher.response_source=last_assistant_response selected an empty response.")
-
-    max_selected_length = int(selected_lengths.max().item())
+    max_selected_length = max(int(selected_lengths.max().item()), 1)
     selected_responses = responses.new_full(
         (responses.shape[0], max_selected_length),
         _select_pad_token_id(batch),
@@ -350,6 +347,8 @@ def _select_masked_responses(batch: DataProto) -> tuple[torch.Tensor, torch.Tens
         dtype=batch.batch["response_mask"].dtype,
     )
     for index, length in enumerate(selected_lengths.tolist()):
+        if length == 0:
+            continue
         selected_tokens = responses[index][response_mask[index]]
         selected_responses[index, :length] = selected_tokens
         selected_response_mask[index, :length] = 1

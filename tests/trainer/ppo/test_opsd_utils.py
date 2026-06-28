@@ -213,14 +213,31 @@ def test_build_teacher_batch_rejects_last_assistant_response_without_last_assist
         build_opsd_teacher_batch(batch, FakeTokenizer(), config)
 
 
-def test_build_teacher_batch_rejects_empty_selected_last_assistant_response():
+def test_build_teacher_batch_masks_empty_selected_last_assistant_response():
     batch = _batch(extra_info=[{"teacher_prompt": "A"}, {"teacher_prompt": "B"}])
     batch.batch["response_mask"] = torch.tensor([[1, 1], [0, 0]])
     config = _config(response_source="last_assistant_response")
 
     attach_opsd_metadata(batch, config)
-    with pytest.raises(ValueError, match="selected an empty response"):
-        build_opsd_teacher_batch(batch, FakeTokenizer(), config)
+    teacher_batch = build_opsd_teacher_batch(batch, FakeTokenizer(), config)
+
+    assert torch.equal(teacher_batch.batch["responses"], torch.tensor([[21, 22], [0, 0]]))
+    assert torch.equal(teacher_batch.batch["response_mask"], torch.tensor([[1, 1], [0, 0]]))
+    assert torch.equal(teacher_batch.batch[SELECTED_RESPONSE_MASK_KEY], torch.tensor([[1, 1], [0, 0]]))
+    assert torch.equal(teacher_batch.batch[ORIGINAL_RESPONSE_MASK_KEY], batch.batch["response_mask"])
+
+
+def test_build_teacher_batch_handles_all_empty_selected_last_assistant_response():
+    batch = _batch(extra_info=[{"teacher_prompt": "A"}, {"teacher_prompt": "B"}])
+    batch.batch["response_mask"] = torch.zeros((2, 2), dtype=torch.long)
+    config = _config(response_source="last_assistant_response")
+
+    attach_opsd_metadata(batch, config)
+    teacher_batch = build_opsd_teacher_batch(batch, FakeTokenizer(), config)
+
+    assert torch.equal(teacher_batch.batch["responses"], torch.zeros((2, 1), dtype=torch.long))
+    assert torch.equal(teacher_batch.batch["response_mask"], torch.zeros((2, 1), dtype=torch.long))
+    assert torch.equal(teacher_batch.batch[SELECTED_RESPONSE_MASK_KEY], torch.zeros((2, 1), dtype=torch.long))
 
 
 def test_restore_selected_response_teacher_logprobs_to_original_response_shape():
