@@ -1113,6 +1113,23 @@ class MultiTaskSelfRewardProcessor:
         self.reuse_gqm_post_edit_first_turn_scores = self.config.custom_processor.get(
             "reuse_gqm_post_edit_first_turn_scores", False
         )
+        self.enable_gqm_post_edit_fallback_bonus = self.config.custom_processor.get(
+            "enable_gqm_post_edit_fallback_bonus", False
+        )
+        self.gqm_post_edit_fallback_bonus_reward = self.config.custom_processor.get(
+            "gqm_post_edit_fallback_bonus_reward", 0.0
+        )
+        if self.enable_gqm_post_edit_fallback_bonus:
+            if not self.reuse_gqm_post_edit_first_turn_scores:
+                raise ValueError(
+                    "enable_gqm_post_edit_fallback_bonus requires "
+                    "reuse_gqm_post_edit_first_turn_scores=True"
+                )
+            if self.group_post_edit_score_mode != "mt_group_advantage":
+                raise ValueError(
+                    "enable_gqm_post_edit_fallback_bonus requires "
+                    "group_post_edit_score_mode='mt_group_advantage'"
+                )
         if self.enable_language_detection:
             print(f"Language detection enabled")
 
@@ -1124,7 +1141,9 @@ class MultiTaskSelfRewardProcessor:
               f"gpe_score_scale_factor={self.gpe_score_scale_factor}, "
               f"group_post_edit_score_mode={self.group_post_edit_score_mode}, "
               f"rm_max_candidates={self.rm_max_candidates}, "
-              f"reuse_gqm_post_edit_first_turn_scores={self.reuse_gqm_post_edit_first_turn_scores}")
+              f"reuse_gqm_post_edit_first_turn_scores={self.reuse_gqm_post_edit_first_turn_scores}, "
+              f"enable_gqm_post_edit_fallback_bonus={self.enable_gqm_post_edit_fallback_bonus}, "
+              f"gqm_post_edit_fallback_bonus_reward={self.gqm_post_edit_fallback_bonus_reward}")
 
     def _split_by_ability(self, data) -> Tuple[List[int], List[int], List[int], List[int]]:
         abilities = data.non_tensor_batch.get("ability", None)
@@ -1221,6 +1240,11 @@ class MultiTaskSelfRewardProcessor:
             score_mode=self.group_post_edit_score_mode,
             response_texts=post_edit_responses,
         )
+        if self.enable_gqm_post_edit_fallback_bonus:
+            fallback_scores = {
+                idx: score + self.gqm_post_edit_fallback_bonus_reward if score > 0 else score
+                for idx, score in fallback_scores.items()
+            }
         scores_dict.update(fallback_scores)
         return scores_dict
 

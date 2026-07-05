@@ -474,6 +474,155 @@ def test_multitask_gqm_post_edit_reuse_scores_only_duplicates_and_falls_back_for
     ]
 
 
+def test_multitask_gqm_post_edit_fallback_bonus_disabled_keeps_positive_reward():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": True,
+            "enable_gqm_post_edit_fallback_bonus": False,
+            "gqm_post_edit_fallback_bonus_reward": 0.25,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored"])
+    data = _Data(
+        ["unused"],
+        [_extra(["baseline one", "baseline two"])],
+        abilities=["gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 7, B: 3"},
+                    {"role": "assistant", "content": "```zh\nnew edit\n```"},
+                ]
+            }
+        ],
+    )
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, lambda prompts: [_output("A: 1, B: 3, C: 9")])
+
+    assert scores == [pytest.approx((9 - (1 + 3) / 2) * 0.1)]
+
+
+def test_multitask_gqm_post_edit_fallback_bonus_adds_to_positive_fallback_only():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": True,
+            "enable_gqm_post_edit_fallback_bonus": True,
+            "gqm_post_edit_fallback_bonus_reward": 0.25,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored one", "ignored two", "ignored three"])
+    data = _Data(
+        ["unused one", "unused two", "unused three"],
+        [
+            _extra(["candidate one", "candidate two"]),
+            _extra(["baseline one", "baseline two"]),
+            _extra(["low baseline one", "low baseline two"]),
+        ],
+        abilities=["gqm_post_edit", "gqm_post_edit", "gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 2, B: 8"},
+                    {"role": "assistant", "content": "```zh\ncandidate two\n```"},
+                ]
+            },
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 7, B: 3"},
+                    {"role": "assistant", "content": "```zh\nnew edit\n```"},
+                ]
+            },
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 7, B: 3"},
+                    {"role": "assistant", "content": "```zh\nworse edit\n```"},
+                ]
+            },
+        ],
+    )
+
+    def generate_fn(prompts):
+        if not prompts:
+            return []
+        assert len(prompts) == 2
+        return [_output("A: 1, B: 3, C: 9"), _output("A: 9, B: 7, C: 1")]
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, generate_fn)
+
+    fast_path_score = (8 - (2 + 8) / 2) * 0.1
+    positive_fallback_score = (9 - (1 + 3) / 2) * 0.1
+    non_positive_fallback_score = (1 - (9 + 7) / 2) * 0.1
+    assert scores == [
+        pytest.approx(fast_path_score),
+        pytest.approx(positive_fallback_score + 0.25),
+        pytest.approx(non_positive_fallback_score),
+    ]
+
+
+def test_multitask_gqm_post_edit_fallback_bonus_requires_fast_path_reuse():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": False,
+            "enable_gqm_post_edit_fallback_bonus": True,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+
+    with pytest.raises(ValueError, match="reuse_gqm_post_edit_first_turn_scores=True"):
+        MultiTaskSelfRewardProcessor(config=config, tokenizer=_Tokenizer(), input_tokenizer=_Tokenizer())
+
+
+def test_multitask_gqm_post_edit_fallback_bonus_requires_mt_group_advantage():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": True,
+            "enable_gqm_post_edit_fallback_bonus": True,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="grpo_group_score",
+    )
+
+    with pytest.raises(ValueError, match="group_post_edit_score_mode='mt_group_advantage'"):
+        MultiTaskSelfRewardProcessor(config=config, tokenizer=_Tokenizer(), input_tokenizer=_Tokenizer())
+
+
 def test_multitask_gqm_post_edit_grpo_group_score_uses_uid_group():
     config = SimpleNamespace(
         prompt_length=1000,
