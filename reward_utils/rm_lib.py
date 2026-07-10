@@ -533,8 +533,10 @@ def process_group_post_edit_outputs(
     score_scale_factor: float,
     default_reward: float,
     overlong_buffer_cfg,
-) -> Dict[int, float]:
+    return_score_metadata: bool = False,
+) -> Any:
     scores_dict: Dict[int, float] = {}
+    score_metadata: Dict[int, Dict[str, Any]] = {}
     for j, output in enumerate(outputs):
         text = output.outputs[0].text
         info = kept_info[j]
@@ -544,6 +546,8 @@ def process_group_post_edit_outputs(
         scores = group_extract_scores(text, prompt_format, num_candidates)
         if scores is None:
             scores_dict[orig_idx] = default_reward
+            if return_score_metadata:
+                score_metadata[orig_idx] = {"post_edit_beats_all_inputs": False}
             continue
         pe_mt_score = scores[pe_score_idx]
         score_indices = info.get("score_indices", list(range(num_candidates)))
@@ -552,6 +556,14 @@ def process_group_post_edit_outputs(
         relative_reward = (pe_mt_score - mean_all) * score_scale_factor
         penalty = _compute_overlong_penalty(info["response_len"], overlong_buffer_cfg)
         scores_dict[orig_idx] = relative_reward - penalty
+        if return_score_metadata:
+            score_metadata[orig_idx] = {
+                "post_edit_score": pe_mt_score,
+                "input_scores": mean_scores,
+                "post_edit_beats_all_inputs": all(pe_mt_score > input_score for input_score in mean_scores),
+            }
+    if return_score_metadata:
+        return scores_dict, score_metadata
     return scores_dict
 
 
@@ -573,9 +585,10 @@ def compute_group_post_edit_scores(
     indices: Optional[List[int]] = None,
     score_mode: str = "mt_group_advantage",
     response_texts: Optional[List[Optional[str]]] = None,
-) -> Dict[int, float]:
+    return_score_metadata: bool = False,
+) -> Any:
     if score_mode == "grpo_group_score":
-        return compute_group_translation_scores(
+        scores = compute_group_translation_scores(
             data,
             generate_fn,
             tokenizer,
@@ -591,6 +604,7 @@ def compute_group_post_edit_scores(
             indices=indices,
             response_texts=response_texts,
         )
+        return (scores, {}) if return_score_metadata else scores
     if score_mode != "mt_group_advantage":
         raise ValueError(
             "group post-edit score_mode must be one of "
@@ -614,7 +628,7 @@ def compute_group_post_edit_scores(
     # Keep distributed RM generation collectives aligned across ranks even when this task has no local prompts; see fix de799290.
     outputs = generate_fn(prompt_list)
     if not prompt_list:
-        return {}
+        return ({}, {}) if return_score_metadata else {}
     return process_group_post_edit_outputs(
         outputs,
         kept_info,
@@ -622,6 +636,7 @@ def compute_group_post_edit_scores(
         score_scale_factor=score_scale_factor,
         default_reward=default_reward,
         overlong_buffer_cfg=overlong_buffer_cfg,
+        return_score_metadata=return_score_metadata,
     )
 
 
@@ -1119,6 +1134,9 @@ class MultiTaskSelfRewardProcessor:
         self.gqm_post_edit_fallback_bonus_reward = self.config.custom_processor.get(
             "gqm_post_edit_fallback_bonus_reward", 0.0
         )
+        self.enable_gqm_post_edit_best_score_bonus = self.config.custom_processor.get(
+            "enable_gqm_post_edit_best_score_bonus", False
+        )
         if self.enable_gqm_post_edit_fallback_bonus:
             if not self.reuse_gqm_post_edit_first_turn_scores:
                 raise ValueError(
@@ -1128,6 +1146,12 @@ class MultiTaskSelfRewardProcessor:
             if self.group_post_edit_score_mode != "mt_group_advantage":
                 raise ValueError(
                     "enable_gqm_post_edit_fallback_bonus requires "
+                    "group_post_edit_score_mode='mt_group_advantage'"
+                )
+        if self.enable_gqm_post_edit_best_score_bonus:
+            if self.group_post_edit_score_mode != "mt_group_advantage":
+                raise ValueError(
+                    "enable_gqm_post_edit_best_score_bonus requires "
                     "group_post_edit_score_mode='mt_group_advantage'"
                 )
         if self.enable_language_detection:
@@ -1143,7 +1167,8 @@ class MultiTaskSelfRewardProcessor:
               f"rm_max_candidates={self.rm_max_candidates}, "
               f"reuse_gqm_post_edit_first_turn_scores={self.reuse_gqm_post_edit_first_turn_scores}, "
               f"enable_gqm_post_edit_fallback_bonus={self.enable_gqm_post_edit_fallback_bonus}, "
-              f"gqm_post_edit_fallback_bonus_reward={self.gqm_post_edit_fallback_bonus_reward}")
+              f"gqm_post_edit_fallback_bonus_reward={self.gqm_post_edit_fallback_bonus_reward}, "
+              f"enable_gqm_post_edit_best_score_bonus={self.enable_gqm_post_edit_best_score_bonus}")
 
     def _split_by_ability(self, data) -> Tuple[List[int], List[int], List[int], List[int]]:
         abilities = data.non_tensor_batch.get("ability", None)
@@ -1225,7 +1250,7 @@ class MultiTaskSelfRewardProcessor:
                 f"ratio={skipped_ratio:.2%}"
             )
 
-        fallback_scores = compute_group_post_edit_scores(
+        fallback_result = compute_group_post_edit_scores(
             data, generate_fn, self.tokenizer, self.input_tokenizer,
             extractor_type=self.extractor_type,
             max_prompt_length=self.max_prompt_length,
@@ -1239,10 +1264,27 @@ class MultiTaskSelfRewardProcessor:
             indices=remaining_indices,
             score_mode=self.group_post_edit_score_mode,
             response_texts=post_edit_responses,
+            return_score_metadata=self.enable_gqm_post_edit_best_score_bonus,
         )
-        if self.enable_gqm_post_edit_fallback_bonus:
+        if self.enable_gqm_post_edit_best_score_bonus:
+            fallback_scores, fallback_score_metadata = fallback_result
+        else:
+            fallback_scores = fallback_result
+            fallback_score_metadata = {}
+        if self.enable_gqm_post_edit_fallback_bonus or self.enable_gqm_post_edit_best_score_bonus:
+            bonus_rewards = {}
+            for idx, score in fallback_scores.items():
+                bonus_reward = 0.0
+                if self.enable_gqm_post_edit_fallback_bonus and score > 0:
+                    bonus_reward += self.gqm_post_edit_fallback_bonus_reward
+                if (
+                    self.enable_gqm_post_edit_best_score_bonus
+                    and fallback_score_metadata.get(idx, {}).get("post_edit_beats_all_inputs", False)
+                ):
+                    bonus_reward += self.gqm_post_edit_fallback_bonus_reward
+                bonus_rewards[idx] = bonus_reward
             fallback_scores = {
-                idx: score + self.gqm_post_edit_fallback_bonus_reward if score > 0 else score
+                idx: score + bonus_rewards[idx]
                 for idx, score in fallback_scores.items()
             }
         scores_dict.update(fallback_scores)

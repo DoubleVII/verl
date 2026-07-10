@@ -581,6 +581,142 @@ def test_multitask_gqm_post_edit_fallback_bonus_adds_to_positive_fallback_only()
     ]
 
 
+def test_multitask_gqm_post_edit_best_score_bonus_adds_when_post_edit_beats_all_inputs():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": True,
+            "enable_gqm_post_edit_best_score_bonus": True,
+            "gqm_post_edit_fallback_bonus_reward": 0.25,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored one", "ignored two"])
+    data = _Data(
+        ["unused one", "unused two"],
+        [_extra(["baseline one", "baseline two"]), _extra(["candidate one", "candidate two"])],
+        abilities=["gqm_post_edit", "gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 7, B: 3"},
+                    {"role": "assistant", "content": "```zh\nnew edit\n```"},
+                ]
+            },
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 2, B: 8"},
+                    {"role": "assistant", "content": "```zh\ncandidate two\n```"},
+                ]
+            },
+        ],
+    )
+
+    def generate_fn(prompts):
+        if not prompts:
+            return []
+        assert len(prompts) == 1
+        return [_output("A: 1, B: 3, C: 9")]
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, generate_fn)
+
+    fallback_score = (9 - (1 + 3) / 2) * 0.1
+    fast_path_score = (8 - (2 + 8) / 2) * 0.1
+    assert scores == [
+        pytest.approx(fallback_score + 0.25),
+        pytest.approx(fast_path_score),
+    ]
+
+
+def test_multitask_gqm_post_edit_best_score_bonus_requires_strictly_higher_score():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": True,
+            "enable_gqm_post_edit_best_score_bonus": True,
+            "gqm_post_edit_fallback_bonus_reward": 0.25,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored"])
+    data = _Data(
+        ["unused"],
+        [_extra(["baseline one", "baseline two"])],
+        abilities=["gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 7, B: 3"},
+                    {"role": "assistant", "content": "```zh\nnew edit\n```"},
+                ]
+            }
+        ],
+    )
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, lambda prompts: [] if not prompts else [_output("A: 1, B: 9, C: 9")])
+
+    assert scores == [pytest.approx((9 - (1 + 9) / 2) * 0.1)]
+
+
+def test_multitask_gqm_post_edit_best_score_bonus_stacks_with_positive_fallback_bonus():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "reuse_gqm_post_edit_first_turn_scores": True,
+            "enable_gqm_post_edit_fallback_bonus": True,
+            "enable_gqm_post_edit_best_score_bonus": True,
+            "gqm_post_edit_fallback_bonus_reward": 0.25,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="mt_group_advantage",
+    )
+    tokenizer = _Tokenizer()
+    input_tokenizer = _Tokenizer(["ignored"])
+    data = _Data(
+        ["unused"],
+        [_extra(["baseline one", "baseline two"])],
+        abilities=["gqm_post_edit"],
+        messages=[
+            {
+                "messages": [
+                    {"role": "assistant", "content": "A: 7, B: 3"},
+                    {"role": "assistant", "content": "```zh\nnew edit\n```"},
+                ]
+            }
+        ],
+    )
+
+    processor = MultiTaskSelfRewardProcessor(config=config, tokenizer=tokenizer, input_tokenizer=input_tokenizer)
+    scores = processor.compute_scores(data, lambda prompts: [] if not prompts else [_output("A: 1, B: 3, C: 9")])
+
+    fallback_score = (9 - (1 + 3) / 2) * 0.1
+    assert scores == [pytest.approx(fallback_score + 0.5)]
+
+
 def test_multitask_gqm_post_edit_fallback_bonus_requires_fast_path_reuse():
     config = SimpleNamespace(
         prompt_length=1000,
@@ -609,6 +745,26 @@ def test_multitask_gqm_post_edit_fallback_bonus_requires_mt_group_advantage():
             "extractor_type": "codeblock",
             "reuse_gqm_post_edit_first_turn_scores": True,
             "enable_gqm_post_edit_fallback_bonus": True,
+        },
+        group_prompt_type="ranking_score",
+        group_add_example=False,
+        score_scale_factor=0.1,
+        gpe_score_scale_factor=0.1,
+        default_reward=-1.0,
+        rm_max_candidates=4,
+        group_post_edit_score_mode="grpo_group_score",
+    )
+
+    with pytest.raises(ValueError, match="group_post_edit_score_mode='mt_group_advantage'"):
+        MultiTaskSelfRewardProcessor(config=config, tokenizer=_Tokenizer(), input_tokenizer=_Tokenizer())
+
+
+def test_multitask_gqm_post_edit_best_score_bonus_requires_mt_group_advantage():
+    config = SimpleNamespace(
+        prompt_length=1000,
+        custom_processor={
+            "extractor_type": "codeblock",
+            "enable_gqm_post_edit_best_score_bonus": True,
         },
         group_prompt_type="ranking_score",
         group_add_example=False,
