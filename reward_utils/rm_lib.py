@@ -1272,21 +1272,56 @@ class MultiTaskSelfRewardProcessor:
             fallback_scores = fallback_result
             fallback_score_metadata = {}
         if self.enable_gqm_post_edit_fallback_bonus or self.enable_gqm_post_edit_best_score_bonus:
+            positive_fallback_bonus_rewards = {}
+            best_score_bonus_rewards = {}
             bonus_rewards = {}
             for idx, score in fallback_scores.items():
-                bonus_reward = 0.0
-                if self.enable_gqm_post_edit_fallback_bonus and score > 0:
-                    bonus_reward += self.gqm_post_edit_fallback_bonus_reward
-                if (
-                    self.enable_gqm_post_edit_best_score_bonus
-                    and fallback_score_metadata.get(idx, {}).get("post_edit_beats_all_inputs", False)
-                ):
-                    bonus_reward += self.gqm_post_edit_fallback_bonus_reward
-                bonus_rewards[idx] = bonus_reward
+                positive_fallback_bonus_reward = (
+                    self.gqm_post_edit_fallback_bonus_reward
+                    if self.enable_gqm_post_edit_fallback_bonus and score > 0
+                    else 0.0
+                )
+                best_score_bonus_reward = (
+                    self.gqm_post_edit_fallback_bonus_reward
+                    if (
+                        self.enable_gqm_post_edit_best_score_bonus
+                        and fallback_score_metadata.get(idx, {}).get("post_edit_beats_all_inputs", False)
+                    )
+                    else 0.0
+                )
+                positive_fallback_bonus_rewards[idx] = positive_fallback_bonus_reward
+                best_score_bonus_rewards[idx] = best_score_bonus_reward
+                bonus_rewards[idx] = positive_fallback_bonus_reward + best_score_bonus_reward
             fallback_scores = {
                 idx: score + bonus_rewards[idx]
                 for idx, score in fallback_scores.items()
             }
+            fallback_count = len(fallback_scores)
+            if fallback_count:
+                final_reward_mean = sum(fallback_scores.values()) / fallback_count
+                total_bonus_reward_mean = sum(bonus_rewards.values()) / fallback_count
+                positive_fallback_bonus_mean = sum(positive_fallback_bonus_rewards.values()) / fallback_count
+                best_score_bonus_mean = sum(best_score_bonus_rewards.values()) / fallback_count
+                original_reward_mean = final_reward_mean - total_bonus_reward_mean
+                positive_fallback_bonus_hit_count = sum(
+                    1 for bonus_reward in positive_fallback_bonus_rewards.values() if bonus_reward > 0
+                )
+                best_score_bonus_hit_count = sum(
+                    1 for bonus_reward in best_score_bonus_rewards.values() if bonus_reward > 0
+                )
+                total_bonus_hit_count = sum(1 for bonus_reward in bonus_rewards.values() if bonus_reward > 0)
+                print(
+                    "[GQM_GPE_BONUS_STATS] "
+                    f"fallback={fallback_count} "
+                    f"positive_bonus_hits={positive_fallback_bonus_hit_count}/{fallback_count} "
+                    f"best_score_bonus_hits={best_score_bonus_hit_count}/{fallback_count} "
+                    f"total_bonus_hits={total_bonus_hit_count}/{fallback_count} "
+                    f"final_reward_mean={final_reward_mean:.6f} "
+                    f"original_reward_mean={original_reward_mean:.6f} "
+                    f"positive_bonus_mean={positive_fallback_bonus_mean:.6f} "
+                    f"best_score_bonus_mean={best_score_bonus_mean:.6f} "
+                    f"total_bonus_mean={total_bonus_reward_mean:.6f}"
+                )
         scores_dict.update(fallback_scores)
         return scores_dict
 
