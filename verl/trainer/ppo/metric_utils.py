@@ -100,6 +100,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
             - response_length/mean, max, min, clip_ratio: Statistics about response lengths
             - prompt_length/mean, max, min, clip_ratio: Statistics about prompt lengths
             - num_turns/mean, max, min: Statistics about the number of multi-turn conversations
+            - task/{task_type}/response_length/mean: Mean response length for each task type
     """
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
@@ -230,6 +231,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         for task_type in sorted(unique_abilities):
             task_mask = np.array([str(a).strip().lower() == task_type for a in abilities])
             metrics[f"task/{task_type}/ratio"] = task_mask.sum() / total_count
+            metrics[f"task/{task_type}/response_length/mean"] = response_length[task_mask].mean().detach().item()
             task_non_aborted = task_mask & non_aborted_mask.cpu().numpy()
             if task_non_aborted.sum() > 0:
                 metrics[f"task/{task_type}/score/mean"] = sequence_score[task_non_aborted].mean().detach().item()
