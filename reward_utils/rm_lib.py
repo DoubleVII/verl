@@ -1138,11 +1138,6 @@ class MultiTaskSelfRewardProcessor:
             "enable_gqm_post_edit_best_score_bonus", False
         )
         if self.enable_gqm_post_edit_fallback_bonus:
-            if not self.reuse_gqm_post_edit_first_turn_scores:
-                raise ValueError(
-                    "enable_gqm_post_edit_fallback_bonus requires "
-                    "reuse_gqm_post_edit_first_turn_scores=True"
-                )
             if self.group_post_edit_score_mode != "mt_group_advantage":
                 raise ValueError(
                     "enable_gqm_post_edit_fallback_bonus requires "
@@ -1211,7 +1206,7 @@ class MultiTaskSelfRewardProcessor:
         )
 
     def _process_group_post_edit_task(self, data, group_post_edit_indices: List[int], generate_fn) -> Dict[int, float]:
-        return compute_group_post_edit_scores(
+        result = compute_group_post_edit_scores(
             data, generate_fn, self.tokenizer, self.input_tokenizer,
             extractor_type=self.extractor_type,
             max_prompt_length=self.max_prompt_length,
@@ -1224,7 +1219,71 @@ class MultiTaskSelfRewardProcessor:
             enable_language_detection=self.enable_language_detection,
             indices=group_post_edit_indices,
             score_mode=self.group_post_edit_score_mode,
+            return_score_metadata=self.enable_gqm_post_edit_best_score_bonus,
         )
+        if self.enable_gqm_post_edit_best_score_bonus:
+            scores, score_metadata = result
+        else:
+            scores = result
+            score_metadata = {}
+        return self._apply_gqm_post_edit_bonuses(scores, score_metadata, stats_prefix="GROUP_GPE")
+
+    def _apply_gqm_post_edit_bonuses(
+        self,
+        scores: Dict[int, float],
+        score_metadata: Dict[int, Dict[str, Any]],
+        *,
+        stats_prefix: str,
+        count_name: str = "scored",
+    ) -> Dict[int, float]:
+        if not (self.enable_gqm_post_edit_fallback_bonus or self.enable_gqm_post_edit_best_score_bonus):
+            return scores
+
+        positive_bonus_rewards = {}
+        best_score_bonus_rewards = {}
+        bonus_rewards = {}
+        for idx, score in scores.items():
+            positive_bonus_reward = (
+                self.gqm_post_edit_fallback_bonus_reward
+                if self.enable_gqm_post_edit_fallback_bonus and score > 0
+                else 0.0
+            )
+            best_score_bonus_reward = (
+                self.gqm_post_edit_fallback_bonus_reward
+                if (
+                    self.enable_gqm_post_edit_best_score_bonus
+                    and score_metadata.get(idx, {}).get("post_edit_beats_all_inputs", False)
+                )
+                else 0.0
+            )
+            positive_bonus_rewards[idx] = positive_bonus_reward
+            best_score_bonus_rewards[idx] = best_score_bonus_reward
+            bonus_rewards[idx] = positive_bonus_reward + best_score_bonus_reward
+
+        final_scores = {idx: score + bonus_rewards[idx] for idx, score in scores.items()}
+        scored_count = len(final_scores)
+        if scored_count:
+            final_reward_mean = sum(final_scores.values()) / scored_count
+            total_bonus_reward_mean = sum(bonus_rewards.values()) / scored_count
+            positive_bonus_mean = sum(positive_bonus_rewards.values()) / scored_count
+            best_score_bonus_mean = sum(best_score_bonus_rewards.values()) / scored_count
+            original_reward_mean = final_reward_mean - total_bonus_reward_mean
+            positive_bonus_hit_count = sum(1 for reward in positive_bonus_rewards.values() if reward > 0)
+            best_score_bonus_hit_count = sum(1 for reward in best_score_bonus_rewards.values() if reward > 0)
+            total_bonus_hit_count = sum(1 for reward in bonus_rewards.values() if reward > 0)
+            print(
+                f"[{stats_prefix}_BONUS_STATS] "
+                f"{count_name}={scored_count} "
+                f"positive_bonus_hits={positive_bonus_hit_count}/{scored_count} "
+                f"best_score_bonus_hits={best_score_bonus_hit_count}/{scored_count} "
+                f"total_bonus_hits={total_bonus_hit_count}/{scored_count} "
+                f"final_reward_mean={final_reward_mean:.6f} "
+                f"original_reward_mean={original_reward_mean:.6f} "
+                f"positive_bonus_mean={positive_bonus_mean:.6f} "
+                f"best_score_bonus_mean={best_score_bonus_mean:.6f} "
+                f"total_bonus_mean={total_bonus_reward_mean:.6f}"
+            )
+        return final_scores
 
     def _process_gqm_post_edit_task(self, data, gqm_post_edit_indices: List[int], generate_fn) -> Dict[int, float]:
         post_edit_responses = _decode_last_assistant_response(data, self.input_tokenizer, self.extractor_type)
@@ -1271,57 +1330,12 @@ class MultiTaskSelfRewardProcessor:
         else:
             fallback_scores = fallback_result
             fallback_score_metadata = {}
-        if self.enable_gqm_post_edit_fallback_bonus or self.enable_gqm_post_edit_best_score_bonus:
-            positive_fallback_bonus_rewards = {}
-            best_score_bonus_rewards = {}
-            bonus_rewards = {}
-            for idx, score in fallback_scores.items():
-                positive_fallback_bonus_reward = (
-                    self.gqm_post_edit_fallback_bonus_reward
-                    if self.enable_gqm_post_edit_fallback_bonus and score > 0
-                    else 0.0
-                )
-                best_score_bonus_reward = (
-                    self.gqm_post_edit_fallback_bonus_reward
-                    if (
-                        self.enable_gqm_post_edit_best_score_bonus
-                        and fallback_score_metadata.get(idx, {}).get("post_edit_beats_all_inputs", False)
-                    )
-                    else 0.0
-                )
-                positive_fallback_bonus_rewards[idx] = positive_fallback_bonus_reward
-                best_score_bonus_rewards[idx] = best_score_bonus_reward
-                bonus_rewards[idx] = positive_fallback_bonus_reward + best_score_bonus_reward
-            fallback_scores = {
-                idx: score + bonus_rewards[idx]
-                for idx, score in fallback_scores.items()
-            }
-            fallback_count = len(fallback_scores)
-            if fallback_count:
-                final_reward_mean = sum(fallback_scores.values()) / fallback_count
-                total_bonus_reward_mean = sum(bonus_rewards.values()) / fallback_count
-                positive_fallback_bonus_mean = sum(positive_fallback_bonus_rewards.values()) / fallback_count
-                best_score_bonus_mean = sum(best_score_bonus_rewards.values()) / fallback_count
-                original_reward_mean = final_reward_mean - total_bonus_reward_mean
-                positive_fallback_bonus_hit_count = sum(
-                    1 for bonus_reward in positive_fallback_bonus_rewards.values() if bonus_reward > 0
-                )
-                best_score_bonus_hit_count = sum(
-                    1 for bonus_reward in best_score_bonus_rewards.values() if bonus_reward > 0
-                )
-                total_bonus_hit_count = sum(1 for bonus_reward in bonus_rewards.values() if bonus_reward > 0)
-                print(
-                    "[GQM_GPE_BONUS_STATS] "
-                    f"fallback={fallback_count} "
-                    f"positive_bonus_hits={positive_fallback_bonus_hit_count}/{fallback_count} "
-                    f"best_score_bonus_hits={best_score_bonus_hit_count}/{fallback_count} "
-                    f"total_bonus_hits={total_bonus_hit_count}/{fallback_count} "
-                    f"final_reward_mean={final_reward_mean:.6f} "
-                    f"original_reward_mean={original_reward_mean:.6f} "
-                    f"positive_bonus_mean={positive_fallback_bonus_mean:.6f} "
-                    f"best_score_bonus_mean={best_score_bonus_mean:.6f} "
-                    f"total_bonus_mean={total_bonus_reward_mean:.6f}"
-                )
+        fallback_scores = self._apply_gqm_post_edit_bonuses(
+            fallback_scores,
+            fallback_score_metadata,
+            stats_prefix="GQM_GPE",
+            count_name="fallback",
+        )
         scores_dict.update(fallback_scores)
         return scores_dict
 
