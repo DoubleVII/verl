@@ -262,6 +262,75 @@ def _extract_ranking_score(output_text: str) -> Optional[dict]:
         return None
 
 
+def _extract_post_edit_mt(output_text: str) -> Optional[str]:
+    output_text = output_text.strip()
+    if not output_text.endswith("```"):
+        return None
+
+    block_content = output_text[:-3]
+    block_start = block_content.rfind("```")
+    if block_start == -1:
+        return None
+
+    post_edit_mt = block_content[block_start + 3:]
+    if post_edit_mt and not post_edit_mt.startswith("\n"):
+        lines = post_edit_mt.split("\n", 1)
+        post_edit_mt = lines[1] if len(lines) == 2 else ""
+    post_edit_mt = post_edit_mt.strip()
+    return post_edit_mt or None
+
+
+def _extract_gqmpe_ranking_score(output_text: str) -> Optional[dict]:
+    ranking_header = "### Final Ranking:"
+    score_header = "### Scores:"
+    post_edit_analysis_header = "# Post-edit Analysis"
+    final_translation_header = "# Final post-edited translation"
+
+    try:
+        ranking_header_index = output_text.rindex(ranking_header)
+        score_header_index = output_text.index(
+            score_header, ranking_header_index + len(ranking_header)
+        )
+        post_edit_analysis_index = output_text.index(
+            post_edit_analysis_header, score_header_index + len(score_header)
+        )
+        final_translation_index = output_text.index(
+            final_translation_header,
+            post_edit_analysis_index + len(post_edit_analysis_header),
+        )
+    except ValueError:
+        return None
+
+    cot_text = output_text[:ranking_header_index].strip()
+    ranking_text = output_text[
+        ranking_header_index + len(ranking_header):score_header_index
+    ].strip()
+    score_text = output_text[
+        score_header_index + len(score_header):post_edit_analysis_index
+    ].strip()
+    post_edit_analysis = output_text[
+        post_edit_analysis_index
+        + len(post_edit_analysis_header):final_translation_index
+    ].strip()
+    post_edit_section = output_text[final_translation_index:]
+    post_edit_mt = _extract_post_edit_mt(post_edit_section)
+
+    if not all((cot_text, ranking_text, score_text, post_edit_analysis, post_edit_mt)):
+        return None
+    if "\n" in ranking_text or "\n" in score_text:
+        return None
+
+    return {
+        "cot_text": cot_text,
+        "score_text": score_text,
+        "ranking_text": ranking_text,
+        "score_header": score_header,
+        "ranking_header": ranking_header,
+        "post_edit_analysis": post_edit_analysis,
+        "post_edit_mt": post_edit_mt,
+    }
+
+
 def _parse_score_text(score_text: str) -> Optional[dict]:
     """
     B: 6, A: 5, C: 2
@@ -400,3 +469,45 @@ def ranking_score_reward_fn(
         return ranking_reward_fn_no_cot_ranking_score_response(
             data_source, no_cot_solution_str, ground_truth, extra_info, score_scale_factor=score_scale_factor
         )
+
+
+def gqmpe_ranking_score_reward_fn(
+    data_source,
+    solution_str,
+    ground_truth: Union[str, dict],
+    extra_info=None,
+    score_scale_factor: float = 1.0,
+):
+    """Score the ranking section of a GQMPE response.
+
+    The post-edited translation is not scored here, but a non-empty final
+    translation code block is required for the response to be valid.
+    """
+    reward_out = {
+        "score": 0,
+        "valid_answer": 0,
+        "ranking_reward": 0,
+        "score_reward": 0,
+    }
+    extract_out = _extract_gqmpe_ranking_score(solution_str)
+    if extract_out is None:
+        return reward_out
+
+    no_cot_solution_str = (
+        f"{extract_out['ranking_text']}\n{extract_out['score_text']}"
+    )
+    if isinstance(ground_truth, str) and not ground_truth.strip().startswith("{"):
+        return ranking_reward_fn_no_cot_ranking_score_response(
+            data_source,
+            no_cot_solution_str,
+            ground_truth,
+            extra_info,
+            score_scale_factor=score_scale_factor,
+        )
+    return ranking_score_reward_fn_no_cot(
+        data_source,
+        no_cot_solution_str,
+        ground_truth,
+        extra_info,
+        score_scale_factor=score_scale_factor,
+    )
