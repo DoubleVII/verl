@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple, Iterable, Any
 
+from verl.utils.import_utils import load_extern_type
+
 try:
     from .helpers import (
         _line_extractor,
@@ -1153,6 +1155,9 @@ class MultiTaskSelfRewardProcessor:
             print(f"Language detection enabled")
 
         self.ranking_score_scale_factor = getattr(self.config, "ranking_score_scale_factor", score_scale_factor)
+        self.ranking_reward_fn, self.ranking_reward_kwargs = self._load_ranking_reward_fn(
+            kwargs.get("ranking_reward_fn")
+        )
 
         print(f"MultiTaskSelfRewardProcessor initialized with prompt_type={self.prompt_type}, "
               f"mt_score_scale_factor={self.mt_score_scale_factor}, "
@@ -1164,6 +1169,31 @@ class MultiTaskSelfRewardProcessor:
               f"enable_gqm_post_edit_fallback_bonus={self.enable_gqm_post_edit_fallback_bonus}, "
               f"gqm_post_edit_fallback_bonus_reward={self.gqm_post_edit_fallback_bonus_reward}, "
               f"enable_gqm_post_edit_best_score_bonus={self.enable_gqm_post_edit_best_score_bonus}")
+
+    def _load_ranking_reward_fn(self, reward_fn=None):
+        reward_fn_config = self.config.custom_processor.get("ranking_reward_fn", None)
+        reward_kwargs = {}
+
+        if reward_fn is not None:
+            if reward_fn_config:
+                reward_kwargs = dict(_get_obj_value(reward_fn_config, "reward_kwargs", {}) or {})
+            return reward_fn, reward_kwargs
+
+        if reward_fn_config:
+            path = _get_obj_value(reward_fn_config, "path", None)
+            name = _get_obj_value(reward_fn_config, "name", None)
+            if not path or not name:
+                raise ValueError("custom_processor.ranking_reward_fn requires both 'path' and 'name'")
+            reward_fn = load_extern_type(str(path), str(name))
+            reward_kwargs = dict(_get_obj_value(reward_fn_config, "reward_kwargs", {}) or {})
+            print(f"Using ranking reward function '{name}' from '{path}'")
+            return reward_fn, reward_kwargs
+
+        try:
+            from reward_utils.ranking_score_reward import ranking_score_reward_fn
+        except ImportError:
+            from .ranking_score_reward import ranking_score_reward_fn
+        return ranking_score_reward_fn, reward_kwargs
 
     def _split_by_ability(self, data) -> Tuple[List[int], List[int], List[int], List[int]]:
         abilities = data.non_tensor_batch.get("ability", None)
@@ -1343,11 +1373,6 @@ class MultiTaskSelfRewardProcessor:
         if not ranking_indices:
             return {}
 
-        try:
-            from reward_utils.ranking_score_reward import ranking_score_reward_fn
-        except ImportError:
-            from .ranking_score_reward import ranking_score_reward_fn
-
         scores_dict: Dict[int, float] = {}
 
         for idx in ranking_indices:
@@ -1386,15 +1411,25 @@ class MultiTaskSelfRewardProcessor:
                 except (IndexError, KeyError, TypeError):
                     extra_info = None
 
-            reward_result = ranking_score_reward_fn(
+            reward_call_kwargs = dict(
                 data_source=data_source,
                 solution_str=solution_str,
                 ground_truth=ground_truth,
                 extra_info=extra_info,
                 score_scale_factor=self.ranking_score_scale_factor,
             )
+            reward_call_kwargs.update(self.ranking_reward_kwargs)
+            reward_result = self.ranking_reward_fn(**reward_call_kwargs)
 
-            scores_dict[idx] = reward_result.get("score", self.default_reward)
+            if isinstance(reward_result, dict):
+                scores_dict[idx] = reward_result.get("score", self.default_reward)
+            elif isinstance(reward_result, (int, float)):
+                scores_dict[idx] = float(reward_result)
+            else:
+                raise TypeError(
+                    "ranking reward function must return a score number or a dict containing 'score', "
+                    f"got {type(reward_result).__name__}"
+                )
 
         return scores_dict
 
