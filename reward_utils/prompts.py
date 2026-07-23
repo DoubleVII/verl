@@ -108,6 +108,15 @@ Source text:
 
 {}{}"""
 
+GROUP_GQMPE_PROMPT_TEMPLATE = """Given a source text in {} and multiple translation candidates in {}. Perform a step by step analysis and comparison of the translation quality for the candidates. {} Then provide a detailed post-edit analysis and a final improved translation in {}, selecting, combining, or editing the candidates as appropriate.
+
+Source text:
+```
+{}
+```
+
+{}"""
+
 CANDIDATE_PROMPT = """Translation {}:
 ```
 {}
@@ -177,7 +186,10 @@ def get_GQM_prompt(
     notes: str = None,
     ref_text: str = None,
     ref_lang: str = None,
+    task_type: str = "gqm",
 ) -> str:
+    if task_type not in {"gqm", "gqmpe"}:
+        raise ValueError("task_type must be one of ['gqm', 'gqmpe']")
     if len(mt_texts) == 1:
         raise ValueError("Only support multiple candidates.")
     if len(mt_texts) > len(candidate_identifiers):
@@ -186,8 +198,24 @@ def get_GQM_prompt(
         source_lang = LANG_MAP[source_lang]
     if len(target_lang) == 2 and target_lang in LANG_MAP:
         target_lang = LANG_MAP[target_lang]
-    task_prompt = _group_get_task_prompt(prompt_format, add_example)
     candidate_prompts = "".join([CANDIDATE_PROMPT.format(candidate_identifiers[i], mt_texts[i]) for i in range(len(mt_texts))])
+
+    if task_type == "gqmpe":
+        has_notes = notes is not None and str(notes).strip()
+        has_reference = any(value is not None and str(value).strip() for value in (ref_text, ref_lang))
+        if add_example or has_notes or has_reference:
+            raise ValueError("GQMPE does not support examples, notes, or references.")
+        task_prompt = _group_get_task_prompt(prompt_format, add_example=False)
+        return GROUP_GQMPE_PROMPT_TEMPLATE.format(
+            source_lang,
+            target_lang,
+            task_prompt,
+            target_lang,
+            source_text,
+            candidate_prompts,
+        )
+
+    task_prompt = _group_get_task_prompt(prompt_format, add_example)
     reference_prompt = _build_reference_prompt(ref_text, ref_lang)
     notes_prompt = _build_notes_prompt(notes)
     return GROUP_PROMPT_TEMPLATE.format(source_lang, target_lang, task_prompt, source_text, candidate_prompts, reference_prompt + notes_prompt)

@@ -275,6 +275,7 @@ def compute_group_translation_scores(
     default_reward: float,
     overlong_buffer_cfg,
     enable_language_detection: bool,
+    group_task_type: str = "gqm",
     indices: Optional[List[int]] = None,
     response_texts: Optional[List[Optional[str]]] = None,
     return_reward_model_metadata: bool = False,
@@ -375,6 +376,7 @@ def compute_group_translation_scores(
             src_lang, tgt_lang, src_text, unique_texts,
             prompt_type, add_example=add_example, notes=notes,
             ref_text=ref_text, ref_lang=ref_lang,
+            task_type=group_task_type,
         )
         messages = [{"role": "user", "content": prompt}]
         input_text = tokenizer.apply_chat_template(
@@ -420,7 +422,7 @@ def compute_group_translation_scores(
             group_info = kept_groups[j]
             dup_map = group_info["dup_map"]
             candidate_lens = group_info.get("candidate_lens", [0] * len(dup_map))
-            scores = group_extract_scores(text, prompt_type, len(dup_map))
+            scores = group_extract_scores(text, prompt_type, len(dup_map), task_type=group_task_type)
             if scores is None:
                 scores = [default_reward] * len(dup_map)
                 reward_failed_count += len(dup_map)
@@ -455,6 +457,7 @@ def prepare_group_post_edit_inputs(
     add_example: bool,
     rm_max_candidates: int,
     enable_language_detection: bool,
+    group_task_type: str = "gqm",
     indices: Optional[List[int]] = None,
     response_texts: Optional[List[Optional[str]]] = None,
 ) -> Tuple[List[Dict[str, List[int]]], List[Dict], int]:
@@ -505,6 +508,7 @@ def prepare_group_post_edit_inputs(
             notes=notes,
             ref_text=ref_text,
             ref_lang=ref_lang,
+            task_type=group_task_type,
         )
         messages = [{"role": "user", "content": prompt}]
         input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -535,6 +539,7 @@ def process_group_post_edit_outputs(
     score_scale_factor: float,
     default_reward: float,
     overlong_buffer_cfg,
+    group_task_type: str = "gqm",
     return_score_metadata: bool = False,
 ) -> Any:
     scores_dict: Dict[int, float] = {}
@@ -545,7 +550,7 @@ def process_group_post_edit_outputs(
         num_candidates = info["num_candidates"]
         orig_idx = info["orig_idx"]
         pe_score_idx = info.get("pe_score_idx", num_candidates - 1)
-        scores = group_extract_scores(text, prompt_format, num_candidates)
+        scores = group_extract_scores(text, prompt_format, num_candidates, task_type=group_task_type)
         if scores is None:
             scores_dict[orig_idx] = default_reward
             if return_score_metadata:
@@ -584,6 +589,7 @@ def compute_group_post_edit_scores(
     rm_max_candidates: int,
     overlong_buffer_cfg,
     enable_language_detection: bool,
+    group_task_type: str = "gqm",
     indices: Optional[List[int]] = None,
     score_mode: str = "mt_group_advantage",
     response_texts: Optional[List[Optional[str]]] = None,
@@ -603,6 +609,7 @@ def compute_group_post_edit_scores(
             default_reward=default_reward,
             overlong_buffer_cfg=overlong_buffer_cfg,
             enable_language_detection=enable_language_detection,
+            group_task_type=group_task_type,
             indices=indices,
             response_texts=response_texts,
         )
@@ -624,6 +631,7 @@ def compute_group_post_edit_scores(
         add_example=add_example,
         rm_max_candidates=rm_max_candidates,
         enable_language_detection=enable_language_detection,
+        group_task_type=group_task_type,
         indices=indices,
         response_texts=response_texts,
     )
@@ -638,6 +646,7 @@ def compute_group_post_edit_scores(
         score_scale_factor=score_scale_factor,
         default_reward=default_reward,
         overlong_buffer_cfg=overlong_buffer_cfg,
+        group_task_type=group_task_type,
         return_score_metadata=return_score_metadata,
     )
 
@@ -1115,7 +1124,12 @@ class MultiTaskSelfRewardProcessor:
         print(f"Using extractor_type: {self.extractor_type}")
 
         self.prompt_type = getattr(self.config, "group_prompt_type", "ranking_score")
+        self.group_task_type = str(getattr(self.config, "group_task_type", "gqm")).strip().lower()
         self.add_example = getattr(self.config, "group_add_example", False)
+        if self.group_task_type not in {"gqm", "gqmpe"}:
+            raise ValueError("group_task_type must be one of ['gqm', 'gqmpe']")
+        if self.group_task_type == "gqmpe" and self.add_example:
+            raise ValueError("GQMPE does not support group_add_example=true")
         score_scale_factor  = getattr(self.config, "score_scale_factor", 1.0)
         self.mt_score_scale_factor = getattr(self.config, "mt_score_scale_factor", score_scale_factor)
         self.gpe_score_scale_factor = getattr(self.config, "gpe_score_scale_factor", score_scale_factor)
@@ -1160,6 +1174,7 @@ class MultiTaskSelfRewardProcessor:
         )
 
         print(f"MultiTaskSelfRewardProcessor initialized with prompt_type={self.prompt_type}, "
+              f"group_task_type={self.group_task_type}, "
               f"mt_score_scale_factor={self.mt_score_scale_factor}, "
               f"ranking_score_scale_factor={self.ranking_score_scale_factor}, "
               f"gpe_score_scale_factor={self.gpe_score_scale_factor}, "
@@ -1232,6 +1247,7 @@ class MultiTaskSelfRewardProcessor:
             default_reward=self.default_reward,
             overlong_buffer_cfg=self.mt_overlong_buffer_cfg,
             enable_language_detection=self.enable_language_detection,
+            group_task_type=self.group_task_type,
             indices=translation_indices,
         )
 
@@ -1247,6 +1263,7 @@ class MultiTaskSelfRewardProcessor:
             rm_max_candidates=self.rm_max_candidates,
             overlong_buffer_cfg=self.gpe_overlong_buffer_cfg,
             enable_language_detection=self.enable_language_detection,
+            group_task_type=self.group_task_type,
             indices=group_post_edit_indices,
             score_mode=self.group_post_edit_score_mode,
             return_score_metadata=self.enable_gqm_post_edit_best_score_bonus,

@@ -120,10 +120,114 @@ def _group_parse_score_text(score_text: str) -> Optional[Dict[str, int]]:
     except Exception:
         return None
 
-def group_extract_scores(output_text: str, prompt_type: str, expected_num: int) -> Optional[List[int]]:
-    """Parse scores from LLM output. prompt_type determines parsing: 'score', 'ranking', or 'ranking_score'."""
+
+def _group_ranking_tiers(ranking_text: str) -> list[set[str]]:
+    return [{cid.strip() for cid in tier.split("=")} for tier in ranking_text.split(">")]
+
+
+def _group_score_tiers(score_dict: Dict[str, int]) -> list[set[str]]:
+    return [
+        {cid for cid, score in score_dict.items() if score == tier_score}
+        for tier_score in sorted(set(score_dict.values()), reverse=True)
+    ]
+
+
+def _single_nonempty_line(text: str) -> Optional[str]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[0] if len(lines) == 1 else None
+
+
+def _extract_gqmpe_scores(
+    output_text: str,
+    prompt_type: str,
+    expected_num: int,
+) -> Optional[List[int]]:
+    post_edit_header = "# Post-edit Analysis"
+    final_translation_header = "# Final post-edited translation"
+    final_ranking_header = "### Final Ranking:"
+    scores_header = "### Scores:"
+
+    post_edit_index = output_text.rfind(post_edit_header)
+    final_translation_index = output_text.rfind(final_translation_header)
+    if post_edit_index == -1 or final_translation_index <= post_edit_index:
+        return None
+
+    post_edit_analysis = output_text[post_edit_index + len(post_edit_header) : final_translation_index].strip()
+    final_translation = _block_extractor(output_text)
+    if not post_edit_analysis or final_translation is None:
+        return None
+
+    gqm_text = output_text[:post_edit_index].strip()
+    expected_identifiers = candidate_identifiers[:expected_num]
+    ranking_text = None
+
+    if prompt_type == "score":
+        lines = gqm_text.splitlines()
+        score_line_index = next(
+            (i for i in range(len(lines) - 1, -1, -1) if lines[i].strip()),
+            None,
+        )
+        if score_line_index is None:
+            return None
+        score_text = lines[score_line_index].strip()
+        gqm_analysis = "\n".join(lines[:score_line_index]).strip()
+    elif prompt_type == "ranking":
+        ranking_header_index = gqm_text.rfind(final_ranking_header)
+        if ranking_header_index == -1:
+            return None
+        gqm_analysis = gqm_text[:ranking_header_index].strip()
+        ranking_text = _single_nonempty_line(
+            gqm_text[ranking_header_index + len(final_ranking_header) :]
+        )
+        if ranking_text is None or not _group_validate_ranking(ranking_text, expected_num):
+            return None
+        score_map = _group_ranking_to_scores(ranking_text)
+        return [score_map[cid] for cid in expected_identifiers] if gqm_analysis else None
+    elif prompt_type == "ranking_score":
+        ranking_header_index = gqm_text.rfind(final_ranking_header)
+        score_header_index = gqm_text.rfind(scores_header)
+        if ranking_header_index == -1 or score_header_index <= ranking_header_index:
+            return None
+        gqm_analysis = gqm_text[:ranking_header_index].strip()
+        ranking_text = _single_nonempty_line(
+            gqm_text[ranking_header_index + len(final_ranking_header) : score_header_index]
+        )
+        score_text = _single_nonempty_line(gqm_text[score_header_index + len(scores_header) :])
+        if (
+            ranking_text is None
+            or score_text is None
+            or not _group_validate_ranking(ranking_text, expected_num)
+        ):
+            return None
+    else:
+        raise ValueError("prompt_type must be one of ['score', 'ranking', 'ranking_score']")
+
+    score_dict = _group_parse_score_text(score_text)
+    if (
+        not gqm_analysis
+        or score_dict is None
+        or len(score_text.split(",")) != expected_num
+        or set(score_dict) != set(expected_identifiers)
+    ):
+        return None
+    if ranking_text is not None and _group_ranking_tiers(ranking_text) != _group_score_tiers(score_dict):
+        return None
+    return [score_dict[cid] for cid in expected_identifiers]
+
+
+def group_extract_scores(
+    output_text: str,
+    prompt_type: str,
+    expected_num: int,
+    task_type: str = "gqm",
+) -> Optional[List[int]]:
+    """Parse GQM or GQMPE scores in the configured score/ranking format."""
     output_text = output_text.strip()
+    if task_type not in {"gqm", "gqmpe"}:
+        raise ValueError("task_type must be one of ['gqm', 'gqmpe']")
     try:
+        if task_type == "gqmpe":
+            return _extract_gqmpe_scores(output_text, prompt_type, expected_num)
         if "\n" not in output_text:
             last_line = output_text
         else:
