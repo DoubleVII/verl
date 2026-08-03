@@ -1,3 +1,5 @@
+import json
+import re
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple, Iterable, Any
 
@@ -59,6 +61,22 @@ class RewardProcessorOutput:
 REWARD_MODEL_PROMPTS_KEY = "reward_model_prompts"
 REWARD_MODEL_RESPONSES_KEY = "reward_model_responses"
 
+_FUSED_THINKING_OPEN = "<thinking>"
+_FUSED_THINKING_CLOSE = "</thinking>"
+_FUSED_RESPONSE_OPEN = "<response>"
+_FUSED_RESPONSE_CLOSE = "</response>"
+_FUSED_FLASH_GPE_PATTERN = re.compile(
+    rf"\s*{re.escape(_FUSED_THINKING_OPEN)}\s*(.*?)\s*"
+    rf"{re.escape(_FUSED_THINKING_CLOSE)}\s*"
+    rf"{re.escape(_FUSED_RESPONSE_OPEN)}\s*(.*?)\s*"
+    rf"{re.escape(_FUSED_RESPONSE_CLOSE)}\s*"
+    rf"{re.escape(_FUSED_THINKING_OPEN)}\s*(.*?)\s*"
+    rf"{re.escape(_FUSED_THINKING_CLOSE)}\s*"
+    rf"{re.escape(_FUSED_RESPONSE_OPEN)}\s*(.*?)\s*"
+    rf"{re.escape(_FUSED_RESPONSE_CLOSE)}\s*",
+    re.DOTALL,
+)
+
 
 def single_extract_score(output_text: str) -> Optional[float]:
     output_text = output_text.strip()
@@ -69,6 +87,132 @@ def single_extract_score(output_text: str) -> Optional[float]:
         return float(score)
     except Exception:
         return None
+
+
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1 :]
+        if text.endswith("```"):
+            text = text[:-3].strip()
+    start = text.find("{")
+    if start == -1:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _parse_fused_flash_gpe_response(text: Optional[str]) -> Optional[Tuple[List[str], str]]:
+    if not isinstance(text, str):
+        return None
+    tags = (
+        _FUSED_THINKING_OPEN,
+        _FUSED_THINKING_CLOSE,
+        _FUSED_RESPONSE_OPEN,
+        _FUSED_RESPONSE_CLOSE,
+    )
+    if any(text.count(tag) != 2 for tag in tags):
+        return None
+    match = _FUSED_FLASH_GPE_PATTERN.fullmatch(text)
+    if match is None:
+        return None
+    candidate_thinking, candidate_response, post_edit_thinking, post_edit_response = (
+        value.strip() for value in match.groups()
+    )
+    if not all((candidate_thinking, candidate_response, post_edit_thinking, post_edit_response)):
+        return None
+
+    candidate_payload = _extract_json_object(candidate_response)
+    raw_candidates = candidate_payload.get("translations") if candidate_payload is not None else None
+    if not isinstance(raw_candidates, list):
+        return None
+    if any(not isinstance(candidate, str) or not candidate.strip() for candidate in raw_candidates):
+        return None
+    candidates = [candidate.strip() for candidate in raw_candidates]
+    final_translation = _block_extractor(post_edit_response)
+    if final_translation is None:
+        return None
+    return candidates, final_translation
+
+
+def _is_valid_fused_candidate_count(extra_info: Any, candidate_count: int) -> bool:
+    if not isinstance(extra_info, dict):
+        return False
+    prompt_type = extra_info.get("prompt_type")
+    max_candidates = extra_info.get("max_candidates")
+    try:
+        max_candidates = int(max_candidates)
+    except (TypeError, ValueError):
+        return False
+
+    if prompt_type == "fixed_4":
+        return max_candidates == 4 and candidate_count == 4
+    if prompt_type == "fixed_16":
+        return max_candidates == 16 and candidate_count == 16
+    if prompt_type == "adaptive":
+        return max_candidates >= 2 and 2 <= candidate_count <= max_candidates
+    return False
+
+
+def _normalize_fused_candidate(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _has_normalized_duplicate(candidates: List[str]) -> bool:
+    normalized = [_normalize_fused_candidate(candidate) for candidate in candidates]
+    return len(set(normalized)) != len(normalized)
+
+
+def _myers_insert_delete_distance(left: List[int], right: List[int]) -> int:
+    """Return shortest insert/delete edit distance using Myers' O((N+M)D) algorithm."""
+    left_len = len(left)
+    right_len = len(right)
+    if left_len == 0:
+        return right_len
+    if right_len == 0:
+        return left_len
+
+    frontier = {1: 0}
+    for distance in range(left_len + right_len + 1):
+        next_frontier: Dict[int, int] = {}
+        for diagonal in range(-distance, distance + 1, 2):
+            if diagonal == -distance or (
+                diagonal != distance
+                and frontier.get(diagonal - 1, -1) < frontier.get(diagonal + 1, -1)
+            ):
+                x = frontier.get(diagonal + 1, 0)
+            else:
+                x = frontier.get(diagonal - 1, 0) + 1
+            y = x - diagonal
+            while x < left_len and y < right_len and left[x] == right[y]:
+                x += 1
+                y += 1
+            next_frontier[diagonal] = x
+            if x >= left_len and y >= right_len:
+                return distance
+        frontier = next_frontier
+    return left_len + right_len
+
+
+def _token_myers_diversity(candidates: List[str], tokenizer) -> float:
+    tokenized = [list(tokenizer.encode(candidate, add_special_tokens=False)) for candidate in candidates]
+    pairwise_distances: List[float] = []
+    for left_idx in range(len(tokenized)):
+        for right_idx in range(left_idx + 1, len(tokenized)):
+            left = tokenized[left_idx]
+            right = tokenized[right_idx]
+            denominator = len(left) + len(right)
+            if denominator == 0:
+                pairwise_distances.append(0.0)
+                continue
+            distance = _myers_insert_delete_distance(left, right)
+            pairwise_distances.append(distance / denominator)
+    return sum(pairwise_distances) / len(pairwise_distances) if pairwise_distances else 0.0
 
 
 def _apply_response_extractor(response: str, extractor_type: str) -> Optional[str]:
@@ -792,6 +936,157 @@ class GroupRewardModelProcessor:
         gqm_outputs = [gqm_outputs_dict.get(i, "") for i in range(total_size)]
         return RewardProcessorOutput(
             scores=scores,
+            non_tensor_batch={
+                REWARD_MODEL_PROMPTS_KEY: gqm_prompts,
+                REWARD_MODEL_RESPONSES_KEY: gqm_outputs,
+            },
+        )
+
+
+class FusedFlashGPERewardModelProcessor(GroupRewardModelProcessor):
+    """Score fused candidate-generation/post-edit responses with a group translation RM."""
+
+    _DIVERSITY_ALGORITHMS = {"none", "exact_match", "token_myers"}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.diversity_algorithm = self.config.custom_processor.get("diversity_algorithm", "none")
+        self.diversity_penalty_weight = float(
+            self.config.custom_processor.get("diversity_penalty_weight", 1.0)
+        )
+        self.diversity_penalty_clip = float(
+            self.config.custom_processor.get("diversity_penalty_clip", 0.0)
+        )
+        diversity_penalty_max = self.config.custom_processor.get("diversity_penalty_max", None)
+        self.diversity_penalty_max = (
+            None if diversity_penalty_max is None else float(diversity_penalty_max)
+        )
+        if self.diversity_algorithm not in self._DIVERSITY_ALGORITHMS:
+            raise ValueError(
+                "diversity_algorithm must be one of "
+                f"{sorted(self._DIVERSITY_ALGORITHMS)}, got {self.diversity_algorithm!r}"
+            )
+        if self.diversity_penalty_weight < 0:
+            raise ValueError("diversity_penalty_weight must be non-negative")
+        if not 0.0 <= self.diversity_penalty_clip <= 1.0:
+            raise ValueError("diversity_penalty_clip must be between 0 and 1")
+        if self.diversity_penalty_max is not None and self.diversity_penalty_max < 0:
+            raise ValueError("diversity_penalty_max must be non-negative or None")
+        print(
+            "FusedFlashGPERewardModelProcessor initialized with "
+            f"diversity_algorithm={self.diversity_algorithm}, "
+            f"diversity_penalty_weight={self.diversity_penalty_weight}, "
+            f"diversity_penalty_clip={self.diversity_penalty_clip}, "
+            f"diversity_penalty_max={self.diversity_penalty_max}"
+        )
+
+    def _cap_diversity_penalty(self, penalty: float) -> float:
+        if self.diversity_penalty_max is None:
+            return penalty
+        return min(penalty, self.diversity_penalty_max)
+
+    def _compute_diversity_penalty(self, candidates: List[str]) -> Tuple[float, Optional[float], bool]:
+        has_duplicate = _has_normalized_duplicate(candidates)
+        if self.diversity_algorithm == "none":
+            return 0.0, None, has_duplicate
+        if self.diversity_algorithm == "exact_match":
+            penalty = self.diversity_penalty_weight if has_duplicate else 0.0
+            return self._cap_diversity_penalty(penalty), None, has_duplicate
+
+        diversity = _token_myers_diversity(candidates, self.input_tokenizer)
+        penalty = (
+            max(1.0 - diversity - self.diversity_penalty_clip, 0.0)
+            * self.diversity_penalty_weight
+        )
+        return self._cap_diversity_penalty(penalty), diversity, has_duplicate
+
+    def compute_scores(self, data, generate_fn):
+        total_size = data.batch.batch_size[0]
+        raw_responses = _decode_response(data, self.input_tokenizer, "none")
+        extra_info_list = data.non_tensor_batch.get("extra_info", None)
+        if extra_info_list is None:
+            raise ValueError("extra_info not found in batch")
+
+        final_translations: List[Optional[str]] = [None] * total_size
+        valid_indices: List[int] = []
+        penalties: Dict[int, float] = {}
+        parse_failed_count = 0
+        count_failed_count = 0
+        duplicate_hit_count = 0
+        token_diversities: List[float] = []
+
+        for idx, raw_response in enumerate(raw_responses):
+            parsed = _parse_fused_flash_gpe_response(raw_response)
+            if parsed is None:
+                parse_failed_count += 1
+                continue
+            candidates, final_translation = parsed
+            if not _is_valid_fused_candidate_count(extra_info_list[idx], len(candidates)):
+                count_failed_count += 1
+                continue
+
+            penalty, token_diversity, has_duplicate = self._compute_diversity_penalty(candidates)
+            if has_duplicate:
+                duplicate_hit_count += 1
+            if token_diversity is not None:
+                token_diversities.append(token_diversity)
+            final_translations[idx] = final_translation
+            valid_indices.append(idx)
+            penalties[idx] = penalty
+
+        result = compute_group_translation_scores(
+            data,
+            generate_fn,
+            self.tokenizer,
+            self.input_tokenizer,
+            extractor_type="none",
+            max_prompt_length=self.max_prompt_length,
+            prompt_type=self.prompt_type,
+            add_example=self.add_example,
+            score_scale_factor=self.score_scale_factor,
+            default_reward=self.default_reward,
+            overlong_buffer_cfg=self.overlong_buffer_cfg,
+            enable_language_detection=self.enable_language_detection,
+            indices=valid_indices,
+            response_texts=final_translations,
+            return_reward_model_metadata=self.return_reward_model_metadata,
+        )
+        if self.return_reward_model_metadata:
+            scores_dict, gqm_prompts_dict, gqm_outputs_dict = result
+        else:
+            scores_dict = result
+            gqm_prompts_dict = {}
+            gqm_outputs_dict = {}
+
+        final_scores: List[float] = [self.default_reward] * total_size
+        for idx in valid_indices:
+            final_scores[idx] = scores_dict.get(idx, self.default_reward) - penalties[idx]
+
+        valid_count = len(valid_indices)
+        mt_scores = [scores_dict.get(idx, self.default_reward) for idx in valid_indices]
+        mt_score_mean = sum(mt_scores) / valid_count if valid_count else 0.0
+        token_diversity_mean = (
+            sum(token_diversities) / len(token_diversities) if token_diversities else 0.0
+        )
+        penalty_mean = sum(penalties.values()) / valid_count if valid_count else 0.0
+        print(
+            "[FUSED_FLASH_GPE_STATS] "
+            f"total={total_size} "
+            f"valid={valid_count} "
+            f"parse_failed={parse_failed_count} "
+            f"count_failed={count_failed_count} "
+            f"duplicate_hits={duplicate_hit_count} "
+            f"mt_score_mean={mt_score_mean:.6f} "
+            f"token_diversity_mean={token_diversity_mean:.6f} "
+            f"penalty_mean={penalty_mean:.6f}"
+        )
+
+        if not self.return_reward_model_metadata:
+            return final_scores
+        gqm_prompts = [gqm_prompts_dict.get(i, None) for i in range(total_size)]
+        gqm_outputs = [gqm_outputs_dict.get(i, "") for i in range(total_size)]
+        return RewardProcessorOutput(
+            scores=final_scores,
             non_tensor_batch={
                 REWARD_MODEL_PROMPTS_KEY: gqm_prompts,
                 REWARD_MODEL_RESPONSES_KEY: gqm_outputs,
