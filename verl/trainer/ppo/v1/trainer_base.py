@@ -1438,7 +1438,7 @@ class PPOTrainer(ABC):
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
 
         # 1. read the fields required by the reward model from TransferQueue.
-        fields = ["prompts", "responses", "raw_prompt"]
+        fields = ["prompts", "responses", "raw_prompt", "data_source", "reward_model", "extra_info"]
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         prompt_lengths = data["prompts"].offsets().diff()
@@ -1455,16 +1455,25 @@ class PPOTrainer(ABC):
         # comes back as a tensordict LinkedList (a `list` subclass), a NonTensorStack or a
         # numpy array. `list(...)` normalizes all of them to a plain list where each element
         # is one sample's chat-message list (whereas `.tolist()` only exists on numpy/tensors).
-        raw_prompts = list(data["raw_prompt"])
-        raw_prompt_arr = np.empty(len(raw_prompts), dtype=object)
-        raw_prompt_arr[:] = raw_prompts
+        def as_object_array(values):
+            values = list(values)
+            array = np.empty(len(values), dtype=object)
+            array[:] = values
+            return array
+
+        non_tensor_batch = {
+            "raw_prompt": as_object_array(data["raw_prompt"]),
+            "data_source": as_object_array(data["data_source"]),
+            "reward_model": as_object_array(data["reward_model"]),
+            "extra_info": as_object_array(data["extra_info"]),
+        }
 
         rm_input = DataProto(
             batch=TensorDict(
                 {"prompts": prompts, "responses": responses, "attention_mask": attention_mask},
                 batch_size=len(batch),
             ),
-            non_tensor_batch={"raw_prompt": raw_prompt_arr},
+            non_tensor_batch=non_tensor_batch,
         )
 
         # 3. run the reward model (wakes/sleeps the reward model internally).
