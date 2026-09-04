@@ -207,6 +207,32 @@ def test_invalid_candidate_count_or_config_returns_default(
     assert calls == [[]]
 
 
+def test_target_candidate_count_overrides_max_candidates():
+    responses = [
+        _fused(["one", "two", "three"], "final one"),
+        _fused(["four", "five", "six"], "final two"),
+        _fused(["one", "two", "three", "four"], "invalid final"),
+    ]
+    data = _Data(
+        responses,
+        [
+            {**_extra("adaptive", 8), "target_candidate_count": 3},
+            {**_extra("adaptive", 8), "target_candidate_count": 3},
+            {**_extra("adaptive", 8), "target_candidate_count": 3},
+        ],
+    )
+    data.non_tensor_batch["uid"] = ["g1", "g1", "g2"]
+    processor = _processor(responses)
+    calls = []
+
+    scores = processor.compute_scores(
+        data, lambda prompts: calls.append(prompts) or [_output("A: 2, B: 8")]
+    )
+
+    assert scores == [pytest.approx(0.2), pytest.approx(0.8), -1.0]
+    assert len(calls[0]) == 1
+
+
 def test_none_diversity_keeps_group_mt_reward():
     responses = [
         _fused(["Same", " same ", "third", "fourth"], "final one"),

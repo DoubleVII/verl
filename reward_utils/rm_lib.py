@@ -196,10 +196,25 @@ def _is_valid_fused_candidate_count(extra_info: Any, candidate_count: int) -> bo
     if not isinstance(extra_info, dict):
         return False
     prompt_type = extra_info.get("prompt_type")
+    target_candidate_count = extra_info.get("target_candidate_count")
     max_candidates = extra_info.get("max_candidates")
     try:
         max_candidates = int(max_candidates)
     except (TypeError, ValueError):
+        max_candidates = None
+
+    if target_candidate_count is not None:
+        try:
+            target_candidate_count = int(target_candidate_count)
+        except (TypeError, ValueError):
+            return False
+        if target_candidate_count < 2:
+            return False
+        if max_candidates is not None and target_candidate_count > max_candidates:
+            return False
+        return candidate_count == target_candidate_count
+
+    if max_candidates is None:
         return False
 
     if prompt_type == "markdown":
