@@ -8,6 +8,7 @@ from reward_utils.rm_lib import (
     REWARD_MODEL_PROMPTS_KEY,
     REWARD_MODEL_RESPONSES_KEY,
     FusedFlashGPERewardModelProcessor,
+    FusedFlashGPEMarkdownRewardModelProcessor,
     RewardProcessorOutput,
     _myers_insert_delete_distance,
 )
@@ -104,6 +105,16 @@ compare candidates
 </response>"""
 
 
+def _fused_markdown(candidates, final_translation="final translation"):
+    rendered = "\n\n".join(
+        f"# Candidate {index}\n{candidate}" for index, candidate in enumerate(candidates, 1)
+    )
+    return (
+        f"<thinking>generate</thinking><response>{rendered}</response>"
+        f"<thinking>edit</thinking><response># Final Translation\n{final_translation}</response>"
+    )
+
+
 def _processor(responses, config=None, candidate_tokens=None):
     input_tokenizer = _Tokenizer(responses, candidate_tokens=candidate_tokens)
     processor = FusedFlashGPERewardModelProcessor(
@@ -133,6 +144,20 @@ def test_valid_candidate_counts_score_only_final_translation(prompt_type, max_ca
     assert "final one" in rm_prompt
     assert "final two" in rm_prompt
     assert "candidate 0" not in rm_prompt
+
+
+def test_markdown_processor_parses_new_ffgpe_protocol():
+    responses = [
+        _fused_markdown(["one", "two", "three", "four"], "final"),
+        _fused_markdown(["five", "six", "seven", "eight"], "final two"),
+    ]
+    data = _Data(responses, [_extra("markdown", 4), _extra("markdown", 4)])
+    processor = FusedFlashGPEMarkdownRewardModelProcessor(
+        config=_config(), tokenizer=_Tokenizer(), input_tokenizer=_Tokenizer(responses)
+    )
+    assert processor.compute_scores(data, lambda prompts: [_output("A: 2, B: 8")]) == [
+        pytest.approx(0.2), pytest.approx(0.8)
+    ]
 
 
 @pytest.mark.parametrize(

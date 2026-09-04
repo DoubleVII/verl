@@ -140,6 +140,58 @@ def _parse_fused_flash_gpe_response(text: Optional[str]) -> Optional[Tuple[List[
     return candidates, final_translation
 
 
+def _parse_fused_flash_gpe_markdown_response(
+    text: Optional[str],
+) -> Optional[Tuple[List[str], str]]:
+    """Parse the markdown candidate section and final translation section."""
+    if not isinstance(text, str):
+        return None
+    tags = (
+        _FUSED_THINKING_OPEN,
+        _FUSED_THINKING_CLOSE,
+        _FUSED_RESPONSE_OPEN,
+        _FUSED_RESPONSE_CLOSE,
+    )
+    if any(text.count(tag) != 2 for tag in tags):
+        return None
+    match = _FUSED_FLASH_GPE_PATTERN.fullmatch(text)
+    if match is None:
+        return None
+    candidate_thinking, candidate_response, post_edit_thinking, post_edit_response = (
+        value.strip() for value in match.groups()
+    )
+    if not all((candidate_thinking, candidate_response, post_edit_thinking, post_edit_response)):
+        return None
+
+    matches = list(re.finditer(r"(?m)^# Candidate ([1-9][0-9]*)[ \t]*$", candidate_response))
+    if not matches:
+        return None
+    candidates: List[str] = []
+    for index, candidate_match in enumerate(matches):
+        if int(candidate_match.group(1)) != index + 1:
+            return None
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(candidate_response)
+        value = candidate_response[candidate_match.end() : end].strip()
+        if not value or "```" in value:
+            return None
+        candidates.append(value)
+    normalized = {_normalize_fused_candidate(candidate) for candidate in candidates}
+    if len(normalized) != len(candidates):
+        return None
+
+    marker = "# Final Translation"
+    marker_index = post_edit_response.find(marker)
+    if marker_index != -1:
+        final_translation = post_edit_response[marker_index + len(marker) :].strip()
+        if final_translation.startswith("# ") or "```" in final_translation:
+            return None
+    else:
+        final_translation = _block_extractor(post_edit_response)
+    if not final_translation:
+        return None
+    return candidates, final_translation
+
+
 def _is_valid_fused_candidate_count(extra_info: Any, candidate_count: int) -> bool:
     if not isinstance(extra_info, dict):
         return False
@@ -150,6 +202,8 @@ def _is_valid_fused_candidate_count(extra_info: Any, candidate_count: int) -> bo
     except (TypeError, ValueError):
         return False
 
+    if prompt_type == "markdown":
+        return max_candidates >= 2 and candidate_count == max_candidates
     if prompt_type == "fixed_4":
         return max_candidates == 4 and candidate_count == 4
     if prompt_type == "fixed_16":
@@ -1000,6 +1054,9 @@ class FusedFlashGPERewardModelProcessor(GroupRewardModelProcessor):
         )
         return self._cap_diversity_penalty(penalty), diversity, has_duplicate
 
+    def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
+        return _parse_fused_flash_gpe_response(text)
+
     def compute_scores(self, data, generate_fn):
         total_size = data.batch.batch_size[0]
         raw_responses = _decode_response(data, self.input_tokenizer, "none")
@@ -1016,7 +1073,7 @@ class FusedFlashGPERewardModelProcessor(GroupRewardModelProcessor):
         token_diversities: List[float] = []
 
         for idx, raw_response in enumerate(raw_responses):
-            parsed = _parse_fused_flash_gpe_response(raw_response)
+            parsed = self._parse_response(raw_response)
             if parsed is None:
                 parse_failed_count += 1
                 continue
@@ -1092,6 +1149,16 @@ class FusedFlashGPERewardModelProcessor(GroupRewardModelProcessor):
                 REWARD_MODEL_RESPONSES_KEY: gqm_outputs,
             },
         )
+
+
+class FusedFlashGPEMarkdownRewardModelProcessor(FusedFlashGPERewardModelProcessor):
+    """Fused Flash GPE processor for the markdown output protocol."""
+
+    def compute_scores(self, data, generate_fn):
+        return super().compute_scores(data, generate_fn)
+
+    def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
+        return _parse_fused_flash_gpe_markdown_response(text)
 
 
 class SeedXRewardModelProcessor:
