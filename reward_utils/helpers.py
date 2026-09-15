@@ -42,6 +42,20 @@ def _one_line_extractor(response: str) -> Optional[str]:
     return response
 
 
+def _markdown_extractor(response: str) -> Optional[str]:
+    """Extract the final translation from the ``# Final Translation`` section."""
+    response = response.strip()
+    if not response:
+        return None
+    marker = "# Final Translation"
+    lines = response.splitlines()
+    for line_number, line in enumerate(lines):
+        if line.strip() == marker:
+            extracted = "\n".join(lines[line_number + 1 :]).strip()
+            return extracted or None
+    return None
+
+
 def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[Optional[str]]:
     """Decode batch response token IDs into strings, applying the given extractor strategy."""
     response_list: List[Optional[str]] = []
@@ -60,6 +74,8 @@ def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[
             extracted = _block_extractor(response)
         elif extractor_type == "oneline":
             extracted = _one_line_extractor(response)
+        elif extractor_type == "markdown":
+            extracted = _markdown_extractor(response)
         elif extractor_type == "none":
             extracted = response.strip()
         else:

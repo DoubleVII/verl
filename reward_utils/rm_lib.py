@@ -10,6 +10,7 @@ try:
         _line_extractor,
         _block_extractor,
         _one_line_extractor,
+        _markdown_extractor,
         _decode_response,
         _get_lang_pair,
         group_extract_scores,
@@ -20,6 +21,7 @@ except ImportError:
         _line_extractor,
         _block_extractor,
         _one_line_extractor,
+        _markdown_extractor,
         _decode_response,
         _get_lang_pair,
         group_extract_scores,
@@ -291,6 +293,8 @@ def _apply_response_extractor(response: str, extractor_type: str) -> Optional[st
         return _block_extractor(response)
     if extractor_type == "oneline":
         return _one_line_extractor(response)
+    if extractor_type == "markdown":
+        return _markdown_extractor(response)
     if extractor_type == "none":
         response = response.strip()
         return response if response else None
@@ -1457,6 +1461,8 @@ def batch_bleurt_reward_fn(
                 mt = _block_extractor(mt_raw)
             elif extractor_type == "oneline":
                 mt = _one_line_extractor(mt_raw)
+            elif extractor_type == "markdown":
+                mt = _markdown_extractor(mt_raw)
             else:
                 mt = mt_raw
         else:
