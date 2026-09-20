@@ -9,6 +9,7 @@ from reward_utils.rm_lib import (
     REWARD_MODEL_RESPONSES_KEY,
     FusedFlashGPERewardModelProcessor,
     FusedFlashGPEMarkdownRewardModelProcessor,
+    FusedFlashGPESimpleMarkdownRewardModelProcessor,
     RewardProcessorOutput,
     _myers_insert_delete_distance,
 )
@@ -115,6 +116,20 @@ def _fused_markdown(candidates, final_translation="final translation"):
     )
 
 
+def _fused_simple_markdown(candidates, final_translation="final translation"):
+    rendered = "\n\n".join(
+        f"# Candidate {index}\n{candidate}" for index, candidate in enumerate(candidates, 1)
+    )
+    return (
+        "# Step-by-step Analysis\n\nGenerate diverse candidates.\n\n"
+        f"{rendered}\n\n"
+        "---\n\n"
+        "Now, review the candidates and produce the best final translation.\n\n"
+        "# Step-by-step Analysis\n\nCompare candidate fidelity.\n\n"
+        f"# Final Translation\n\n```\n{final_translation}\n```"
+    )
+
+
 def _processor(responses, config=None, candidate_tokens=None):
     input_tokenizer = _Tokenizer(responses, candidate_tokens=candidate_tokens)
     processor = FusedFlashGPERewardModelProcessor(
@@ -158,6 +173,78 @@ def test_markdown_processor_parses_new_ffgpe_protocol():
     assert processor.compute_scores(data, lambda prompts: [_output("A: 2, B: 8")]) == [
         pytest.approx(0.2), pytest.approx(0.8)
     ]
+
+
+def test_simple_markdown_processor_scores_only_final_translation():
+    responses = [
+        _fused_simple_markdown(["one", "two", "three", "four"], "final one"),
+        _fused_simple_markdown(["five", "six", "seven", "eight"], "final two"),
+    ]
+    data = _Data(responses, [_extra("markdown", 4), _extra("markdown", 4)])
+    tokenizer = _Tokenizer()
+    processor = FusedFlashGPESimpleMarkdownRewardModelProcessor(
+        config=_config(), tokenizer=tokenizer, input_tokenizer=_Tokenizer(responses)
+    )
+
+    scores = processor.compute_scores(data, lambda prompts: [_output("A: 2, B: 8")])
+
+    assert scores == [pytest.approx(0.2), pytest.approx(0.8)]
+    rm_prompt = "\n".join(tokenizer.encoded_texts)
+    assert "final one" in rm_prompt
+    assert "final two" in rm_prompt
+    assert "# Candidate" not in rm_prompt
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _fused_simple_markdown(["one", "two"]).replace(
+            "Now, review the candidates and produce the best final translation.",
+            "Different transition.",
+        ),
+        _fused_simple_markdown(["one", "two"]).replace("\n\n---\n\n", "\n---\n\n"),
+        _fused_simple_markdown(["one", "two"]).replace(
+            "---\n\nNow, review the candidates and produce the best final translation.",
+            "---\n\nNow, review the candidates and produce the best final translation.\n\n"
+            "---\n\nNow, review the candidates and produce the best final translation.",
+        ),
+        _fused_simple_markdown(["one", "two"]).replace(
+            "Generate diverse candidates.", ""
+        ),
+        _fused_simple_markdown(["one", "two"]).replace(
+            "Compare candidate fidelity.", ""
+        ),
+        _fused_simple_markdown(["one", "two"]).replace("```\nfinal translation\n```", "final translation"),
+        _fused_simple_markdown(["one", "two"]).replace(
+            "final translation\n```",
+            "first draft\n```\n\nRevised final translation.\n```",
+        ),
+        _fused_simple_markdown(["one", "two"]) + "\ntrailing text",
+    ],
+)
+def test_simple_markdown_processor_rejects_malformed_protocol(response):
+    calls = []
+    data = _Data([response], [_extra("adaptive", 4)])
+    processor = FusedFlashGPESimpleMarkdownRewardModelProcessor(
+        config=_config(), tokenizer=_Tokenizer(), input_tokenizer=_Tokenizer([response])
+    )
+
+    scores = processor.compute_scores(data, lambda prompts: calls.append(prompts) or [])
+
+    assert scores == [-1.0]
+    assert calls == [[]]
+
+
+def test_simple_markdown_processor_allows_other_horizontal_rules():
+    response = _fused_simple_markdown(["one", "two"]).replace(
+        "Generate diverse candidates.",
+        "Generate diverse candidates.\n\n---\n\nContinue analysis.",
+    )
+    processor = FusedFlashGPESimpleMarkdownRewardModelProcessor(
+        config=_config(), tokenizer=_Tokenizer(), input_tokenizer=_Tokenizer([response])
+    )
+
+    assert processor._parse_response(response) == (["one", "two"], "final translation")
 
 
 @pytest.mark.parametrize(

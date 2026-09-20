@@ -78,6 +78,11 @@ _FUSED_FLASH_GPE_PATTERN = re.compile(
     rf"{re.escape(_FUSED_RESPONSE_CLOSE)}\s*",
     re.DOTALL,
 )
+_FUSED_SIMPLE_SEPARATOR = "---"
+_FUSED_SIMPLE_CONNECTOR = (
+    "Now, review the candidates and produce the best final translation."
+)
+_FUSED_SIMPLE_ANALYSIS_HEADING = "# Step-by-step Analysis"
 
 
 def single_extract_score(output_text: str) -> Optional[float]:
@@ -165,20 +170,8 @@ def _parse_fused_flash_gpe_markdown_response(
     if not all((candidate_thinking, candidate_response, post_edit_thinking, post_edit_response)):
         return None
 
-    matches = list(re.finditer(r"(?m)^# Candidate ([1-9][0-9]*)[ \t]*$", candidate_response))
-    if not matches:
-        return None
-    candidates: List[str] = []
-    for index, candidate_match in enumerate(matches):
-        if int(candidate_match.group(1)) != index + 1:
-            return None
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(candidate_response)
-        value = candidate_response[candidate_match.end() : end].strip()
-        if not value or "```" in value:
-            return None
-        candidates.append(value)
-    normalized = {_normalize_fused_candidate(candidate) for candidate in candidates}
-    if len(normalized) != len(candidates):
+    candidates = _extract_fused_markdown_candidates(candidate_response)
+    if candidates is None:
         return None
 
     marker = "# Final Translation"
@@ -190,6 +183,93 @@ def _parse_fused_flash_gpe_markdown_response(
     else:
         final_translation = _block_extractor(post_edit_response)
     if not final_translation:
+        return None
+    return candidates, final_translation
+
+
+def _extract_fused_markdown_candidates(response: str) -> Optional[List[str]]:
+    matches = list(re.finditer(r"(?m)^# Candidate ([1-9][0-9]*)[ \t]*$", response))
+    if not matches:
+        return None
+    candidates: List[str] = []
+    for index, candidate_match in enumerate(matches):
+        if int(candidate_match.group(1)) != index + 1:
+            return None
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(response)
+        value = response[candidate_match.end() : end].strip()
+        if not value or "```" in value:
+            return None
+        candidates.append(value)
+    normalized = {_normalize_fused_candidate(candidate) for candidate in candidates}
+    if len(normalized) != len(candidates):
+        return None
+    return candidates
+
+
+def _split_fused_simple_analysis_section(
+    text: str,
+    body_heading_pattern: str,
+) -> Optional[Tuple[str, str]]:
+    text = text.strip()
+    analysis_match = re.match(
+        rf"^{re.escape(_FUSED_SIMPLE_ANALYSIS_HEADING)}[ \t]*\n",
+        text,
+    )
+    if analysis_match is None:
+        return None
+    body_match = re.search(body_heading_pattern, text, re.MULTILINE)
+    if body_match is None:
+        return None
+    analysis = text[analysis_match.end() : body_match.start()].strip()
+    response = text[body_match.start() :].strip()
+    if not analysis or not response:
+        return None
+    return analysis, response
+
+
+def _parse_fused_flash_gpe_simple_markdown_response(
+    text: Optional[str],
+) -> Optional[Tuple[List[str], str]]:
+    """Parse the visible-analysis simple Markdown Fused FlashGPE protocol."""
+    if not isinstance(text, str):
+        return None
+    text = text.replace("\r\n", "\n")
+    connector_matches = list(re.finditer(
+        rf"(?m)^[ \t]*{re.escape(_FUSED_SIMPLE_SEPARATOR)}[ \t]*\n{{2,}}"
+        rf"[ \t]*{re.escape(_FUSED_SIMPLE_CONNECTOR)}[ \t]*$",
+        text,
+    ))
+    if len(connector_matches) != 1:
+        return None
+
+    connector_match = connector_matches[0]
+    candidate_stage = text[: connector_match.start()]
+    post_edit_stage = text[connector_match.end() :]
+    if not candidate_stage.endswith("\n\n") or not post_edit_stage.startswith("\n\n"):
+        return None
+    candidate_sections = _split_fused_simple_analysis_section(
+        candidate_stage,
+        r"^# Candidate 1[ \t]*$",
+    )
+    post_edit_sections = _split_fused_simple_analysis_section(
+        post_edit_stage,
+        r"^# Final Translation[ \t]*$",
+    )
+    if candidate_sections is None or post_edit_sections is None:
+        return None
+
+    _, candidate_response = candidate_sections
+    _, post_edit_response = post_edit_sections
+    candidates = _extract_fused_markdown_candidates(candidate_response)
+    if candidates is None:
+        return None
+    if post_edit_response.count("# Final Translation") != 1:
+        return None
+    final_section = post_edit_response[len("# Final Translation") :].strip()
+    if not final_section.startswith("```"):
+        return None
+    final_translation = _block_extractor(final_section)
+    if not final_translation or final_translation.startswith("# ") or "```" in final_translation:
         return None
     return candidates, final_translation
 
@@ -1178,6 +1258,13 @@ class FusedFlashGPEMarkdownRewardModelProcessor(FusedFlashGPERewardModelProcesso
 
     def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
         return _parse_fused_flash_gpe_markdown_response(text)
+
+
+class FusedFlashGPESimpleMarkdownRewardModelProcessor(FusedFlashGPERewardModelProcessor):
+    """Fused Flash GPE processor for the visible-analysis simple Markdown protocol."""
+
+    def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
+        return _parse_fused_flash_gpe_simple_markdown_response(text)
 
 
 class SeedXRewardModelProcessor:
