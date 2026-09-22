@@ -697,7 +697,7 @@ class SGLangRollout(BaseRollout):
         3.  Invoking the SGLang engine (`self._engine.async_generate`,
             an async coroutine) with the batch of processed inputs and
             specified sampling parameters on the master TP rank.
-        4.  Broadcasting the results from the master TP rank to all
+        4.  Flushing the engine cache, then broadcasting results from the master TP rank to all
             other TP ranks.
         5.  Post-processing the engine's output to format the generated
             token IDs and (if applicable) log probabilities.
@@ -705,8 +705,6 @@ class SGLangRollout(BaseRollout):
             prompts with the generated responses.
         7.  Updating attention masks and position IDs to reflect the full
             concatenated sequences.
-        8.  If `self.config.free_cache_engine` is true, the SGLang engine's
-            KV cache is flushed after generation on the master TP rank.
         Args:
             prompts: A `DataProto` object containing the batch of
               input prompts, including tensor data (like `input_ids`,
@@ -829,6 +827,13 @@ class SGLangRollout(BaseRollout):
         else:
             output = None
 
+        # Reclaim the scheduler subprocess's temporary CUDA allocations before
+        # this worker allocates GPU tensors for broadcasting and post-processing.
+        # The worker's allocator cannot reclaim another process's cached memory.
+        if self._engine is not None and self._tp_rank == 0:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self._engine.flush_cache())
+
         # Most naive implementation, can extract tensor and send via gloo if too slow
         dist.barrier()
         [output] = broadcast_pyobj(
@@ -885,11 +890,6 @@ class SGLangRollout(BaseRollout):
         if self.config.calculate_log_probs:
             # we will recompute old log prob with actor
             batch["rollout_log_probs"] = rollout_log_probs
-
-        # free cache engine
-        if self._engine is not None and self._tp_rank == 0:
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(self._engine.flush_cache())
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
