@@ -499,6 +499,7 @@ class SGLangRollout(BaseRollout):
                 "skip_tokenizer_init": self.config.skip_tokenizer_init,
                 "dist_timeout": 1800,
             }
+            args.update(engine_kwargs)
 
             if is_server_mode:
                 # add server specific args
