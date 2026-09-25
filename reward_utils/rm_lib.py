@@ -274,6 +274,83 @@ def _parse_fused_flash_gpe_simple_markdown_response(
     return candidates, final_translation
 
 
+def _parse_fused_flash_gqm_response(
+    text: Optional[str],
+) -> Optional[Tuple[List[str], List[int]]]:
+    """Parse the simple fused FlashGQM candidate and ranking sections."""
+    if not isinstance(text, str):
+        return None
+    text = text.replace("\r\n", "\n")
+    connector_matches = list(re.finditer(
+        rf"(?m)^[ \t]*{re.escape(_FUSED_SIMPLE_SEPARATOR)}[ \t]*\n{{2,}}"
+        rf"[ \t]*Now, rank and score the candidates\.[ \t]*$",
+        text,
+    ))
+    if len(connector_matches) != 1:
+        return None
+    connector = connector_matches[0]
+    candidate_stage = text[:connector.start()]
+    gqm_stage = text[connector.end():]
+    if not candidate_stage.endswith("\n\n") or not gqm_stage.startswith("\n\n"):
+        return None
+    candidate_sections = _split_fused_simple_analysis_section(
+        candidate_stage, r"^# Candidate 1[ \t]*$"
+    )
+    gqm_sections = _split_fused_simple_analysis_section(
+        gqm_stage, r"^# Final Ranking[ \t]*$"
+    )
+    if candidate_sections is None or gqm_sections is None:
+        return None
+    candidates = _extract_fused_markdown_candidates(candidate_sections[1])
+    if candidates is None:
+        return None
+
+    gqm_response = gqm_sections[1]
+    ranking_marker = "# Final Ranking"
+    scores_marker = "# Scores"
+    if gqm_response.count(ranking_marker) != 1 or gqm_response.count(scores_marker) != 1:
+        return None
+    ranking_index = gqm_response.index(ranking_marker)
+    scores_index = gqm_response.index(scores_marker)
+    if ranking_index >= scores_index:
+        return None
+    ranking = gqm_response[ranking_index + len(ranking_marker):scores_index].strip()
+    score_text = gqm_response[scores_index + len(scores_marker):].strip()
+    count = len(candidates)
+    identifiers = [chr(ord("A") + index) for index in range(count)]
+    if "\n" in ranking or "<" in ranking:
+        return None
+    tiers = ranking.split(">")
+    if not tiers or any(not tier.strip() for tier in tiers):
+        return None
+    flattened = []
+    for tier in tiers:
+        values = [value.strip() for value in tier.split("=")]
+        if any(value not in identifiers for value in values):
+            return None
+        flattened.extend(values)
+    if len(flattened) != len(set(flattened)) or set(flattened) != set(identifiers):
+        return None
+    score_map: Dict[str, int] = {}
+    for item in score_text.split(","):
+        match = re.fullmatch(r"\s*([A-Z])\s*:\s*(10|[0-9])\s*", item)
+        if match is None or match.group(1) in score_map:
+            return None
+        score_map[match.group(1)] = int(match.group(2))
+    if set(score_map) != set(identifiers):
+        return None
+    previous_score = None
+    for tier in tiers:
+        tier_scores = {score_map[value.strip()] for value in tier.split("=")}
+        if len(tier_scores) != 1:
+            return None
+        current_score = next(iter(tier_scores))
+        if previous_score is not None and current_score >= previous_score:
+            return None
+        previous_score = current_score
+    return candidates, [score_map[identifier] for identifier in identifiers]
+
+
 def _is_valid_fused_candidate_count(extra_info: Any, candidate_count: int) -> bool:
     if not isinstance(extra_info, dict):
         return False
@@ -1258,6 +1335,104 @@ class FusedFlashGPEMarkdownRewardModelProcessor(FusedFlashGPERewardModelProcesso
 
     def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
         return _parse_fused_flash_gpe_markdown_response(text)
+
+
+class FusedFlashGQMRewardModelProcessor(FusedFlashGPERewardModelProcessor):
+    """Score simple fused FlashGQM responses using their embedded GQM scores."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.score_scale_factor = getattr(self.config, "score_scale_factor", 0.1)
+
+    def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], List[int]]]:
+        return _parse_fused_flash_gqm_response(text)
+
+    def compute_scores(self, data, generate_fn):
+        total_size = data.batch.batch_size[0]
+        raw_responses = _decode_response(data, self.input_tokenizer, "none")
+        extra_info_list = data.non_tensor_batch.get("extra_info", None)
+        if extra_info_list is None:
+            raise ValueError("extra_info not found in batch")
+
+        final_translations: List[Optional[str]] = [None] * total_size
+        valid_indices: List[int] = []
+        penalties: Dict[int, float] = {}
+        parse_failed_count = 0
+        count_failed_count = 0
+        duplicate_hit_count = 0
+        for idx, raw_response in enumerate(raw_responses):
+            parsed = self._parse_response(raw_response)
+            if parsed is None:
+                parse_failed_count += 1
+                continue
+            candidates, candidate_scores = parsed
+            if not _is_valid_fused_candidate_count(extra_info_list[idx], len(candidates)):
+                count_failed_count += 1
+                continue
+            penalty, _, has_duplicate = self._compute_diversity_penalty(candidates)
+            if has_duplicate:
+                duplicate_hit_count += 1
+            selected_index = max(range(len(candidate_scores)), key=candidate_scores.__getitem__)
+            final_translations[idx] = candidates[selected_index]
+            response_ids = data.batch["responses"][idx]
+            resp_len = response_ids.shape[-1]
+            valid_len = data.batch["attention_mask"][idx][-resp_len:].sum()
+            try:
+                valid_len = int(valid_len)
+            except Exception:
+                valid_len = resp_len
+            penalty += _compute_overlong_penalty(valid_len, self.overlong_buffer_cfg)
+            valid_indices.append(idx)
+            penalties[idx] = penalty
+
+        result = compute_group_translation_scores(
+            data,
+            generate_fn,
+            self.tokenizer,
+            self.input_tokenizer,
+            extractor_type="none",
+            max_prompt_length=self.max_prompt_length,
+            prompt_type=self.prompt_type,
+            add_example=self.add_example,
+            score_scale_factor=self.score_scale_factor,
+            default_reward=self.default_reward,
+            overlong_buffer_cfg=None,
+            enable_language_detection=self.enable_language_detection,
+            indices=valid_indices,
+            response_texts=final_translations,
+            return_reward_model_metadata=self.return_reward_model_metadata,
+        )
+        if self.return_reward_model_metadata:
+            scores_dict, gqm_prompts_dict, gqm_outputs_dict = result
+        else:
+            scores_dict = result
+            gqm_prompts_dict = {}
+            gqm_outputs_dict = {}
+
+        final_scores: List[float] = [self.default_reward] * total_size
+        for idx in valid_indices:
+            final_scores[idx] = scores_dict.get(idx, self.default_reward) - penalties[idx]
+        valid_count = len(valid_indices)
+        scored_values = [scores_dict.get(idx, self.default_reward) for idx in valid_indices]
+        penalty_values = [penalties[idx] for idx in valid_indices]
+
+        print(
+            "[FUSED_FLASH_GQM_STATS] "
+            f"total={total_size} valid={valid_count} "
+            f"parse_failed={parse_failed_count} count_failed={count_failed_count} "
+            f"duplicate_hits={duplicate_hit_count} "
+            f"score_mean={(sum(scored_values) / valid_count if valid_count else 0.0):.6f} "
+            f"penalty_mean={(sum(penalty_values) / valid_count if valid_count else 0.0):.6f}"
+        )
+        if not self.return_reward_model_metadata:
+            return final_scores
+        return RewardProcessorOutput(
+            scores=final_scores,
+            non_tensor_batch={
+                REWARD_MODEL_PROMPTS_KEY: [gqm_prompts_dict.get(i, None) for i in range(total_size)],
+                REWARD_MODEL_RESPONSES_KEY: [gqm_outputs_dict.get(i, "") for i in range(total_size)],
+            },
+        )
 
 
 class FusedFlashGPESimpleMarkdownRewardModelProcessor(FusedFlashGPERewardModelProcessor):
