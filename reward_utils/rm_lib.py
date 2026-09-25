@@ -1420,7 +1420,7 @@ def batch_bleurt_reward_fn(
     return final_scores
 
 
-class MultiTaskSelfRewardProcessor:
+class LegacyMultiTaskRewardProcessor:
     """Routes samples to translation, ranking, or group post-edit scoring based on the 'ability' field."""
 
     def __init__(self, *args, **kwargs):
@@ -1487,7 +1487,7 @@ class MultiTaskSelfRewardProcessor:
             kwargs.get("ranking_reward_fn")
         )
 
-        print(f"MultiTaskSelfRewardProcessor initialized with prompt_type={self.prompt_type}, "
+        print(f"LegacyMultiTaskRewardProcessor initialized with prompt_type={self.prompt_type}, "
               f"group_task_type={self.group_task_type}, "
               f"mt_score_scale_factor={self.mt_score_scale_factor}, "
               f"ranking_score_scale_factor={self.ranking_score_scale_factor}, "
@@ -1646,6 +1646,7 @@ class MultiTaskSelfRewardProcessor:
             )
         return final_scores
 
+
     def _process_gqm_post_edit_task(self, data, gqm_post_edit_indices: List[int], generate_fn) -> Dict[int, float]:
         post_edit_responses = _decode_last_assistant_response(data, self.input_tokenizer, self.extractor_type)
         scores_dict: Dict[int, float] = {}
@@ -1787,3 +1788,26 @@ class MultiTaskSelfRewardProcessor:
             final_scores[idx] = score
 
         return final_scores
+
+
+# Backward-compatible name for existing processor configurations.
+MultiTaskSelfRewardProcessor = LegacyMultiTaskRewardProcessor
+
+# New isolated task-router API. Imported here to preserve the established
+# reward_utils.rm_lib entry point used by external processor configuration.
+try:
+    from .multitask import (  # noqa: E402
+        FusedFlashGQMTaskHandler,
+        MultiTaskRewardProcessor,
+        RankingTaskHandler,
+        RewardTaskContext,
+        RewardTaskHandler,
+    )
+except ImportError:
+    from reward_utils.multitask import (  # noqa: E402
+        FusedFlashGQMTaskHandler,
+        MultiTaskRewardProcessor,
+        RankingTaskHandler,
+        RewardTaskContext,
+        RewardTaskHandler,
+    )
