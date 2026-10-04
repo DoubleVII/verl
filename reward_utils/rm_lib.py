@@ -77,6 +77,7 @@ try:
         _extract_json_object,
         _parse_fused_flash_gpe_response,
         _parse_fused_flash_gpe_markdown_response,
+        _parse_inst_fused_flash_gpe_markdown_response,
         _extract_fused_markdown_candidates,
         _split_fused_simple_analysis_section,
         _parse_fused_flash_gpe_simple_markdown_response,
@@ -101,6 +102,7 @@ except ImportError:
         _extract_json_object,
         _parse_fused_flash_gpe_response,
         _parse_fused_flash_gpe_markdown_response,
+        _parse_inst_fused_flash_gpe_markdown_response,
         _extract_fused_markdown_candidates,
         _split_fused_simple_analysis_section,
         _parse_fused_flash_gpe_simple_markdown_response,
@@ -1004,6 +1006,13 @@ class FusedFlashGPEMarkdownRewardModelProcessor(FusedFlashGPERewardModelProcesso
 
     def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
         return _parse_fused_flash_gpe_markdown_response(text)
+
+
+class InstFusedFlashGPEMarkdownRewardModelProcessor(FusedFlashGPERewardModelProcessor):
+    """Processor for the instruct one-pass Markdown Fused FlashGPE protocol."""
+
+    def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
+        return _parse_inst_fused_flash_gpe_markdown_response(text)
 
 
 class FusedFlashGQMRewardModelProcessor(FusedFlashGPERewardModelProcessor):

@@ -138,6 +138,66 @@ def _parse_fused_flash_gpe_markdown_response(
     return candidates, final_translation
 
 
+def _parse_inst_fused_flash_gpe_markdown_response(
+    text: Optional[str],
+) -> Optional[Tuple[List[str], str]]:
+    """Parse the instruct one-pass Fused FlashGPE Markdown protocol.
+
+    The instruct prompt emits visible analysis and candidate comparison around
+    numbered candidate headings, followed by an un-fenced final translation::
+
+        # Step-by-step Analysis
+        ...
+        # Candidate 1
+        ...
+        # Candidate Comparison
+        ...
+        # Final Translation
+        ...
+    """
+    if not isinstance(text, str):
+        return None
+    text = text.replace("\r\n", "\n").strip()
+    analysis_heading = "# Step-by-step Analysis"
+    comparison_heading = "# Candidate Comparison"
+    final_heading = "# Final Translation"
+    if not text.startswith(analysis_heading + "\n"):
+        return None
+    comparison_matches = list(re.finditer(r"(?m)^# Candidate Comparison[ \t]*$", text))
+    final_matches = list(re.finditer(r"(?m)^# Final Translation[ \t]*$", text))
+    if len(comparison_matches) != 1 or len(final_matches) != 1:
+        return None
+
+    first_candidate_match = re.search(r"(?m)^# Candidate 1[ \t]*$", text)
+    if first_candidate_match is None:
+        return None
+    first_candidate = first_candidate_match.start()
+    comparison = comparison_matches[0].start()
+    final = final_matches[0].start()
+    if not (len(analysis_heading) < first_candidate < comparison < final):
+        return None
+
+    analysis = text[len(analysis_heading):first_candidate].strip()
+    candidate_section = text[first_candidate:comparison].strip()
+    comparison_text = text[comparison + len(comparison_heading):final].strip()
+    final_translation = text[final + len(final_heading):].strip()
+    if not analysis or not candidate_section or not comparison_text or not final_translation:
+        return None
+    # The protocol disallows additional Markdown headings in free-form prose
+    # and code fences in any extracted translation.
+    if re.search(r"(?m)^#[ \t]", analysis):
+        return None
+    if re.search(r"(?m)^#[ \t]", comparison_text):
+        return None
+    if re.search(r"(?m)^#[ \t]", final_translation) or "```" in final_translation:
+        return None
+
+    candidates = _extract_fused_markdown_candidates(candidate_section)
+    if candidates is None:
+        return None
+    return candidates, final_translation
+
+
 def _extract_fused_markdown_candidates(response: str) -> Optional[List[str]]:
     matches = list(re.finditer(r"(?m)^# Candidate ([1-9][0-9]*)[ \t]*$", response))
     if not matches:
@@ -392,5 +452,3 @@ def _token_myers_diversity(candidates: List[str], tokenizer) -> float:
             distance = _myers_insert_delete_distance(left, right)
             pairwise_distances.append(distance / denominator)
     return sum(pairwise_distances) / len(pairwise_distances) if pairwise_distances else 0.0
-
-
