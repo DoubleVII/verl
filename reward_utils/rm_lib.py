@@ -16,6 +16,7 @@ try:
         _get_lang_pair,
         group_extract_scores,
         _compute_overlong_penalty,
+        _decode_response_text,
     )
 except ImportError:
     from reward_utils.helpers import (
@@ -28,6 +29,7 @@ except ImportError:
         _get_lang_pair,
         group_extract_scores,
         _compute_overlong_penalty,
+        _decode_response_text,
     )
 
 try:
@@ -56,9 +58,9 @@ except ImportError:
     from reward_utils.language_detector import is_language_match
 
 try:
-    from .process_reward import KeyPointProcessReward
+    from .process_reward import KeyPointProcessReward, process_reward_fn
 except ImportError:
-    from reward_utils.process_reward import KeyPointProcessReward
+    from reward_utils.process_reward import KeyPointProcessReward, process_reward_fn
 
 
 @dataclass
@@ -1420,7 +1422,6 @@ def score_reward_fn(data_source, solution_str, ground_truth, extra_info=None):
     return 0
     # print(f"[debug] extra_info: {extra_info}")
     # raise ValueError("extra_info must be provided")
-
 
 
 def batch_bleurt_reward_fn(

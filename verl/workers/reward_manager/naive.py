@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from collections import defaultdict
+import statistics
 from typing import Any
 
 import torch
@@ -61,6 +62,8 @@ class NaiveRewardManager(AbstractRewardManager):
         reward_extra_info = defaultdict(list)
 
         already_print_data_sources = {}
+        process_metrics = []
+        process_uids = []
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -101,6 +104,9 @@ class NaiveRewardManager(AbstractRewardManager):
                 # Store the information including original reward
                 for key, value in score.items():
                     reward_extra_info[key].append(value)
+                if score.get("_process_reward_metric", False):
+                    process_metrics.append(score)
+                    process_uids.append(str(data_item.non_tensor_batch.get("uid", "batch")))
             else:
                 reward = score
 
@@ -119,6 +125,36 @@ class NaiveRewardManager(AbstractRewardManager):
                         print(f"[{key}]", value)
                 else:
                     print("[score]", score)
+
+        if process_metrics:
+            mean = lambda values: sum(values) / len(values) if values else 0.0
+            point_hits = sum(item["key_points_hit"] for item in process_metrics)
+            point_total = sum(item["key_points_total"] for item in process_metrics)
+            candidate_hits = sum(item["candidates_hit"] for item in process_metrics)
+            candidate_total = sum(item["candidates_total"] for item in process_metrics)
+            hit_ratios = [item["key_point_hit_ratio"] for item in process_metrics]
+            groups = defaultdict(list)
+            for index, uid in enumerate(process_uids):
+                groups[uid].append(index)
+            process_values = [item["process_reward"] for item in process_metrics]
+            group_process_stds = [
+                statistics.pstdev(process_values[i] for i in indexes)
+                for indexes in groups.values() if len(indexes) > 1
+            ]
+            group_hit_stds = [
+                statistics.pstdev(hit_ratios[i] for i in indexes)
+                for indexes in groups.values() if len(indexes) > 1
+            ]
+            print(
+                "[ProcessReward] "
+                f"process_mean={mean(process_values):.6f} "
+                f"key_point_hit_rate={point_hits / point_total if point_total else 0.0:.6f} "
+                f"candidate_hit_rate={candidate_hits / candidate_total if candidate_total else 0.0:.6f} "
+                f"sample_hit_ratio_mean={mean(hit_ratios):.6f} "
+                f"group_process_std={mean(group_process_stds):.6f} "
+                f"group_hit_ratio_std={mean(group_hit_stds):.6f} "
+                f"groups={len(groups)}"
+            )
 
         if return_dict:
             return {

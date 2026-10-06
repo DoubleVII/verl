@@ -4,6 +4,11 @@ from dataclasses import dataclass
 import unicodedata
 from typing import Any, Dict, Iterable, List, Optional
 
+try:
+    from .helpers import _decode_response_text
+except ImportError:
+    from reward_utils.helpers import _decode_response_text
+
 
 def normalize_match_text(value: Any, *, case_sensitive: bool = False) -> str:
     """Normalize Unicode whitespace and case for robust candidate matching."""
@@ -91,3 +96,41 @@ class KeyPointProcessReward:
         if self.max_reward is not None:
             reward = min(reward, self.max_reward)
         return ProcessRewardResult(reward, hit_points, total_points, hit_candidates, total_candidates)
+
+
+def process_reward_fn(
+    data_source,
+    solution_str,
+    ground_truth,
+    extra_info=None,
+    base_reward: float = 0.05,
+    candidate_decay: float = 0.5,
+    allow_multiple_candidates: bool = True,
+    max_reward=None,
+    case_sensitive: bool = False,
+    extractor_type: str = "codeblock",
+    print_stats: bool = True,
+):
+    """Compute key-point process reward without a reward model or generate_fn."""
+    processor = KeyPointProcessReward(
+        base_reward=base_reward,
+        candidate_decay=candidate_decay,
+        allow_multiple_candidates=allow_multiple_candidates,
+        max_reward=max_reward,
+        case_sensitive=case_sensitive,
+    )
+    parts = _decode_response_text(solution_str or "", extractor_type)
+    info = extra_info if isinstance(extra_info, dict) else {}
+    result = processor.score(parts.reasoning, info.get("key_points", []))
+    if not print_stats:
+        return result.reward
+    return {
+        "score": result.reward,
+        "process_reward": result.reward,
+        "key_points_hit": result.key_points_hit,
+        "key_points_total": result.key_points_total,
+        "candidates_hit": result.candidates_hit,
+        "candidates_total": result.candidates_total,
+        "key_point_hit_ratio": result.key_point_hit_ratio,
+        "_process_reward_metric": True,
+    }
