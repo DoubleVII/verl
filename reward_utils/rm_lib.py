@@ -12,6 +12,7 @@ try:
         _one_line_extractor,
         _markdown_extractor,
         _decode_response,
+        _decode_response_parts,
         _get_lang_pair,
         group_extract_scores,
         _compute_overlong_penalty,
@@ -23,6 +24,7 @@ except ImportError:
         _one_line_extractor,
         _markdown_extractor,
         _decode_response,
+        _decode_response_parts,
         _get_lang_pair,
         group_extract_scores,
         _compute_overlong_penalty,
@@ -52,6 +54,11 @@ try:
     from .language_detector import is_language_match
 except ImportError:
     from reward_utils.language_detector import is_language_match
+
+try:
+    from .process_reward import KeyPointProcessReward
+except ImportError:
+    from reward_utils.process_reward import KeyPointProcessReward
 
 
 @dataclass
@@ -803,6 +810,18 @@ class GroupRewardModelProcessor:
             "return_reward_model_metadata",
             self.config.custom_processor.get("return_gqm_outputs", False),
         )
+        process_cfg = self.config.custom_processor.get("process_reward", {}) or {}
+        self.process_reward_enabled = bool(process_cfg.get("enable", False))
+        self.process_reward_print_stats = bool(process_cfg.get("print_stats", True))
+        if self.process_reward_enabled:
+            self.process_reward = KeyPointProcessReward(
+                base_reward=float(process_cfg.get("base_reward", 0.05)),
+                candidate_decay=float(process_cfg.get("candidate_decay", 0.5)),
+                allow_multiple_candidates=bool(process_cfg.get("allow_multiple_candidates", True)),
+                max_reward=(None if process_cfg.get("max_reward", None) is None else float(process_cfg["max_reward"])),
+                case_sensitive=bool(process_cfg.get("case_sensitive", False)),
+            )
+            print("Key-point process reward enabled")
         if self.enable_language_detection:
             print(f"Language detection enabled")
         if self.tokenizer is None:
@@ -830,7 +849,52 @@ class GroupRewardModelProcessor:
             gqm_prompts_dict = {}
             gqm_outputs_dict = {}
         total_size = data.batch.batch_size[0]
-        scores = [scores_dict.get(i, self.default_reward) for i in range(total_size)]
+        outcome_scores = [scores_dict.get(i, self.default_reward) for i in range(total_size)]
+        scores = outcome_scores[:]
+        if self.process_reward_enabled:
+            response_parts = _decode_response_parts(data, self.input_tokenizer, self.extractor_type)
+            extra_info = data.non_tensor_batch.get("extra_info", [{}] * total_size)
+            process_scores = []
+            hit_ratios = []
+            point_hits = point_total = candidate_hits = candidate_total = 0
+            for idx in range(total_size):
+                result = self.process_reward.score(
+                    response_parts[idx].reasoning,
+                    extra_info[idx].get("key_points", []) if isinstance(extra_info[idx], dict) else [],
+                )
+                process_scores.append(result.reward)
+                hit_ratios.append(result.key_point_hit_ratio)
+                point_hits += result.key_points_hit
+                point_total += result.key_points_total
+                candidate_hits += result.candidates_hit
+                candidate_total += result.candidates_total
+                scores[idx] += result.reward
+            if self.process_reward_print_stats:
+                import statistics
+                uids = data.non_tensor_batch.get("uid", None)
+                groups = {}
+                if uids is not None:
+                    for idx, uid in enumerate(uids):
+                        groups.setdefault(str(uid), []).append(idx)
+                elif total_size:
+                    # A missing uid is unusual for GRPO; retain a deterministic
+                    # batch-level fallback so monitoring still reports variance.
+                    groups["batch"] = list(range(total_size))
+                group_process_stds = [statistics.pstdev(process_scores[i] for i in indexes) for indexes in groups.values() if len(indexes) > 1]
+                group_hit_stds = [statistics.pstdev(hit_ratios[i] for i in indexes) for indexes in groups.values() if len(indexes) > 1]
+                mean = lambda values: sum(values) / len(values) if values else 0.0
+                print(
+                    "[ProcessReward] "
+                    f"outcome_mean={mean(outcome_scores):.6f} "
+                    f"process_mean={mean(process_scores):.6f} "
+                    f"final_mean={mean(scores):.6f} "
+                    f"key_point_hit_rate={point_hits / point_total if point_total else 0.0:.6f} "
+                    f"candidate_hit_rate={candidate_hits / candidate_total if candidate_total else 0.0:.6f} "
+                    f"sample_hit_ratio_mean={mean(hit_ratios):.6f} "
+                    f"group_process_std={mean(group_process_stds):.6f} "
+                    f"group_hit_ratio_std={mean(group_hit_stds):.6f} "
+                    f"groups={len(groups)}"
+                )
         if not self.return_reward_model_metadata:
             return scores
         gqm_prompts = [gqm_prompts_dict.get(i, None) for i in range(total_size)]

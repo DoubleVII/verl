@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Optional, Dict, List
 from reward_utils.config import candidate_identifiers
 
@@ -56,34 +57,59 @@ def _markdown_extractor(response: str) -> Optional[str]:
     return None
 
 
-def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[Optional[str]]:
-    """Decode batch response token IDs into strings, applying the given extractor strategy."""
-    response_list: List[Optional[str]] = []
+@dataclass(frozen=True)
+class DecodedResponse:
+    """Decoded rollout response with both reasoning and extracted final text."""
 
+    raw: str
+    reasoning: str
+    final: Optional[str]
+
+
+def _decode_response_text(response: str, extractor_type: str) -> DecodedResponse:
+    """Apply an extractor while retaining the text before the final answer."""
+    raw = response.strip()
+    if extractor_type == "line":
+        final = _line_extractor(raw)
+        lines = raw.splitlines()
+        reasoning = "\n".join(lines[:-1]).strip() if final is not None and lines else raw
+    elif extractor_type == "codeblock":
+        final = _block_extractor(raw)
+        opening = raw.find("```")
+        reasoning = raw[:opening].strip() if final is not None and opening >= 0 else raw
+    elif extractor_type == "oneline":
+        final = _one_line_extractor(raw)
+        reasoning = ""
+    elif extractor_type == "markdown":
+        final = _markdown_extractor(raw)
+        marker = "# Final Translation"
+        marker_pos = raw.find(marker)
+        reasoning = raw[:marker_pos].strip() if final is not None and marker_pos >= 0 else raw
+    elif extractor_type == "none":
+        final = raw or None
+        reasoning = raw
+    else:
+        raise ValueError(f"extractor_type: {extractor_type}")
+    return DecodedResponse(raw=raw, reasoning=reasoning, final=final)
+
+
+def _decode_response_parts(data, src_tokenizer, extractor_type: str = "line") -> List[DecodedResponse]:
+    """Decode a batch and return raw, reasoning, and final translation text."""
+    response_list: List[DecodedResponse] = []
     for i in range(data.batch.batch_size[0]):
         response_ids = data.batch["responses"][i]
         response_length = response_ids.shape[-1]
         valid_response_length = data.batch["attention_mask"][i][-response_length:].sum()
         valid_response_ids = response_ids[:valid_response_length]
-
         response = src_tokenizer.decode(valid_response_ids, skip_special_tokens=True)
         response = response.replace(src_tokenizer.eos_token, "")
-        if extractor_type == "line":
-            extracted = _line_extractor(response)
-        elif extractor_type == "codeblock":
-            extracted = _block_extractor(response)
-        elif extractor_type == "oneline":
-            extracted = _one_line_extractor(response)
-        elif extractor_type == "markdown":
-            extracted = _markdown_extractor(response)
-        elif extractor_type == "none":
-            extracted = response.strip()
-        else:
-            raise ValueError(f"extractor_type: {extractor_type}")
-
-        response_list.append(extracted)
-
+        response_list.append(_decode_response_text(response, extractor_type))
     return response_list
+
+
+def _decode_response(data, src_tokenizer, extractor_type: str = "line") -> List[Optional[str]]:
+    """Decode batch response token IDs into strings, applying the given extractor strategy."""
+    return [part.final for part in _decode_response_parts(data, src_tokenizer, extractor_type)]
 
 
 def _get_lang_pair(extra_info: dict) -> tuple:
