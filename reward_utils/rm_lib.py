@@ -814,7 +814,7 @@ class GroupRewardModelProcessor:
         )
         process_cfg = self.config.custom_processor.get("process_reward", {}) or {}
         self.process_reward_enabled = bool(process_cfg.get("enable", False))
-        # Reasoning rewards are always monitored when enabled; the two switches
+        # Both rewards are always monitored when enabled; the two switches
         # independently control reasoning and final-translation training rewards.
         self.process_reward_apply = bool(process_cfg.get("apply_to_process", True))
         self.process_reward_apply_to_outcome = bool(process_cfg.get("apply_to_outcome", False))
@@ -827,14 +827,13 @@ class GroupRewardModelProcessor:
                 max_reward=(None if process_cfg.get("max_reward", None) is None else float(process_cfg["max_reward"])),
                 case_sensitive=bool(process_cfg.get("case_sensitive", False)),
             )
-            if self.process_reward_apply_to_outcome:
-                self.outcome_process_reward = KeyPointProcessReward(
-                    base_reward=self.process_reward.base_reward,
-                    candidate_decay=self.process_reward.candidate_decay,
-                    allow_multiple_candidates=False,
-                    max_reward=self.process_reward.max_reward,
-                    case_sensitive=self.process_reward.case_sensitive,
-                )
+            self.outcome_process_reward = KeyPointProcessReward(
+                base_reward=self.process_reward.base_reward,
+                candidate_decay=self.process_reward.candidate_decay,
+                allow_multiple_candidates=False,
+                max_reward=self.process_reward.max_reward,
+                case_sensitive=self.process_reward.case_sensitive,
+            )
             print("Key-point process reward enabled")
         if self.enable_language_detection:
             print(f"Language detection enabled")
@@ -879,9 +878,9 @@ class GroupRewardModelProcessor:
                 process_results.append(result)
                 if self.process_reward_apply:
                     scores[idx] += result.reward
+                outcome_result = self.outcome_process_reward.score(response_parts[idx].final or "", key_points)
+                outcome_process_results.append(outcome_result)
                 if self.process_reward_apply_to_outcome:
-                    outcome_result = self.outcome_process_reward.score(response_parts[idx].final or "", key_points)
-                    outcome_process_results.append(outcome_result)
                     scores[idx] += outcome_result.reward
             if self.process_reward_print_stats:
                 import statistics
@@ -895,9 +894,10 @@ class GroupRewardModelProcessor:
                     # batch-level fallback so monitoring still reports variance.
                     groups["batch"] = list(range(total_size))
                 mean = lambda values: sum(values) / len(values) if values else 0.0
-                reward_stats = [("ProcessReward", "process_mean", process_results)]
-                if self.process_reward_apply_to_outcome:
-                    reward_stats.append(("OutcomeProcessReward", "outcome_process_mean", outcome_process_results))
+                reward_stats = [
+                    ("ProcessReward", "process_mean", process_results),
+                    ("OutcomeProcessReward", "outcome_process_mean", outcome_process_results),
+                ]
                 for label, mean_key, results in reward_stats:
                     process_scores = [item.reward for item in results]
                     hit_ratios = [item.key_point_hit_ratio for item in results]
