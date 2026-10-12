@@ -17,6 +17,7 @@ try:
         group_extract_scores,
         _compute_overlong_penalty,
         _decode_response_text,
+        DecodedResponse,
     )
 except ImportError:
     from reward_utils.helpers import (
@@ -30,6 +31,7 @@ except ImportError:
         group_extract_scores,
         _compute_overlong_penalty,
         _decode_response_text,
+        DecodedResponse,
     )
 
 try:
@@ -862,63 +864,10 @@ class GroupRewardModelProcessor:
             gqm_prompts_dict = {}
             gqm_outputs_dict = {}
         total_size = data.batch.batch_size[0]
-        outcome_scores = [scores_dict.get(i, self.default_reward) for i in range(total_size)]
-        scores = outcome_scores[:]
+        scores = [scores_dict.get(i, self.default_reward) for i in range(total_size)]
         if self.process_reward_enabled:
             response_parts = _decode_response_parts(data, self.input_tokenizer, self.extractor_type)
-            extra_info = data.non_tensor_batch.get("extra_info", [{}] * total_size)
-            process_results = []
-            outcome_process_results = []
-            for idx in range(total_size):
-                key_points = extra_info[idx].get("key_points", []) if isinstance(extra_info[idx], dict) else []
-                result = self.process_reward.score(
-                    response_parts[idx].reasoning,
-                    key_points,
-                )
-                process_results.append(result)
-                if self.process_reward_apply:
-                    scores[idx] += result.reward
-                outcome_result = self.outcome_process_reward.score(response_parts[idx].final or "", key_points)
-                outcome_process_results.append(outcome_result)
-                if self.process_reward_apply_to_outcome:
-                    scores[idx] += outcome_result.reward
-            if self.process_reward_print_stats:
-                import statistics
-                uids = data.non_tensor_batch.get("uid", None)
-                groups = {}
-                if uids is not None:
-                    for idx, uid in enumerate(uids):
-                        groups.setdefault(str(uid), []).append(idx)
-                elif total_size:
-                    # A missing uid is unusual for GRPO; retain a deterministic
-                    # batch-level fallback so monitoring still reports variance.
-                    groups["batch"] = list(range(total_size))
-                mean = lambda values: sum(values) / len(values) if values else 0.0
-                reward_stats = [
-                    ("ProcessReward", "process_mean", process_results),
-                    ("OutcomeProcessReward", "outcome_process_mean", outcome_process_results),
-                ]
-                for label, mean_key, results in reward_stats:
-                    process_scores = [item.reward for item in results]
-                    hit_ratios = [item.key_point_hit_ratio for item in results]
-                    point_hits = sum(item.key_points_hit for item in results)
-                    point_total = sum(item.key_points_total for item in results)
-                    candidate_hits = sum(item.candidates_hit for item in results)
-                    candidate_total = sum(item.candidates_total for item in results)
-                    group_process_stds = [statistics.pstdev(process_scores[i] for i in indexes) for indexes in groups.values() if len(indexes) > 1]
-                    group_hit_stds = [statistics.pstdev(hit_ratios[i] for i in indexes) for indexes in groups.values() if len(indexes) > 1]
-                    print(
-                        f"[{label}] "
-                        f"outcome_mean={mean(outcome_scores):.6f} "
-                        f"{mean_key}={mean(process_scores):.6f} "
-                        f"final_mean={mean(scores):.6f} "
-                        f"key_point_hit_rate={point_hits / point_total if point_total else 0.0:.6f} "
-                        f"candidate_hit_rate={candidate_hits / candidate_total if candidate_total else 0.0:.6f} "
-                        f"sample_hit_ratio_mean={mean(hit_ratios):.6f} "
-                        f"group_process_std={mean(group_process_stds):.6f} "
-                        f"group_hit_ratio_std={mean(group_hit_stds):.6f} "
-                        f"groups={len(groups)}"
-                    )
+            scores = self._apply_key_point_rewards(data, scores, response_parts)
         if not self.return_reward_model_metadata:
             return scores
         gqm_prompts = [gqm_prompts_dict.get(i, None) for i in range(total_size)]
@@ -930,6 +879,80 @@ class GroupRewardModelProcessor:
                 REWARD_MODEL_RESPONSES_KEY: gqm_outputs,
             },
         )
+
+    def _apply_key_point_rewards(
+        self,
+        data,
+        outcome_scores: List[float],
+        response_parts: List[DecodedResponse],
+        indices: Optional[List[int]] = None,
+    ) -> List[float]:
+        """Add and monitor key-point rewards for eligible rollout responses."""
+        if not self.process_reward_enabled:
+            return outcome_scores
+        total_size = len(outcome_scores)
+        indices = list(range(total_size)) if indices is None else indices
+        scores = outcome_scores[:]
+        extra_info = data.non_tensor_batch.get("extra_info", [{}] * total_size)
+        process_results = []
+        outcome_process_results = []
+        for idx in indices:
+            key_points = extra_info[idx].get("key_points", []) if isinstance(extra_info[idx], dict) else []
+            result = self.process_reward.score(
+                response_parts[idx].reasoning,
+                key_points,
+            )
+            process_results.append(result)
+            if self.process_reward_apply:
+                scores[idx] += result.reward
+            outcome_result = self.outcome_process_reward.score(response_parts[idx].final or "", key_points)
+            outcome_process_results.append(outcome_result)
+            if self.process_reward_apply_to_outcome:
+                scores[idx] += outcome_result.reward
+        if self.process_reward_print_stats:
+            import statistics
+            uids = data.non_tensor_batch.get("uid", None)
+            groups = {}
+            if uids is not None:
+                for position, idx in enumerate(indices):
+                    groups.setdefault(str(uids[idx]), []).append(position)
+            elif indices:
+                # A missing uid is unusual for GRPO; retain a deterministic
+                # batch-level fallback so monitoring still reports variance.
+                groups["batch"] = list(range(len(indices)))
+            mean = lambda values: sum(values) / len(values) if values else 0.0
+            reward_stats = [
+                ("ProcessReward", "process_mean", process_results),
+                ("OutcomeProcessReward", "outcome_process_mean", outcome_process_results),
+            ]
+            for label, mean_key, results in reward_stats:
+                process_scores = [item.reward for item in results]
+                hit_ratios = [item.key_point_hit_ratio for item in results]
+                point_hits = sum(item.key_points_hit for item in results)
+                point_total = sum(item.key_points_total for item in results)
+                candidate_hits = sum(item.candidates_hit for item in results)
+                candidate_total = sum(item.candidates_total for item in results)
+                group_process_stds = [
+                    statistics.pstdev(process_scores[i] for i in indexes)
+                    for indexes in groups.values() if len(indexes) > 1
+                ]
+                group_hit_stds = [
+                    statistics.pstdev(hit_ratios[i] for i in indexes)
+                    for indexes in groups.values() if len(indexes) > 1
+                ]
+                print(
+                    f"[{label}] "
+                    f"outcome_mean={mean([outcome_scores[i] for i in indices]):.6f} "
+                    f"{mean_key}={mean(process_scores):.6f} "
+                    f"final_mean={mean([scores[i] for i in indices]):.6f} "
+                    f"key_point_hit_rate={point_hits / point_total if point_total else 0.0:.6f} "
+                    f"candidate_hit_rate={candidate_hits / candidate_total if candidate_total else 0.0:.6f} "
+                    f"sample_hit_ratio_mean={mean(hit_ratios):.6f} "
+                    f"group_process_std={mean(group_process_stds):.6f} "
+                    f"group_hit_ratio_std={mean(group_hit_stds):.6f} "
+                    f"groups={len(groups)}"
+                )
+        return scores
 
 
 class FusedFlashGPERewardModelProcessor(GroupRewardModelProcessor):
@@ -991,6 +1014,16 @@ class FusedFlashGPERewardModelProcessor(GroupRewardModelProcessor):
 
     def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
         return _parse_fused_flash_gpe_response(text)
+
+    def _get_process_reward_text(self, text: str) -> str:
+        """Retain all text before the final answer in a validated tagged response."""
+        match = _FUSED_FLASH_GPE_PATTERN.fullmatch(text)
+        final_response = match.group(4)
+        final_start = match.start(4) + self._get_final_reward_start(final_response)
+        return text[:final_start].strip()
+
+    def _get_final_reward_start(self, final_response: str) -> int:
+        return final_response.index("```")
 
     def compute_scores(self, data, generate_fn):
         total_size = data.batch.batch_size[0]
@@ -1054,6 +1087,19 @@ class FusedFlashGPERewardModelProcessor(GroupRewardModelProcessor):
         for idx in valid_indices:
             final_scores[idx] = scores_dict.get(idx, self.default_reward) - penalties[idx]
 
+        if self.process_reward_enabled:
+            response_parts = [
+                DecodedResponse(raw=text or "", reasoning="", final=None) for text in raw_responses
+            ]
+            for idx in valid_indices:
+                text = raw_responses[idx]
+                response_parts[idx] = DecodedResponse(
+                    raw=text,
+                    reasoning=self._get_process_reward_text(text),
+                    final=final_translations[idx],
+                )
+            final_scores = self._apply_key_point_rewards(data, final_scores, response_parts, valid_indices)
+
         valid_count = len(valid_indices)
         mt_scores = [scores_dict.get(idx, self.default_reward) for idx in valid_indices]
         mt_score_mean = sum(mt_scores) / valid_count if valid_count else 0.0
@@ -1095,12 +1141,23 @@ class FusedFlashGPEMarkdownRewardModelProcessor(FusedFlashGPERewardModelProcesso
     def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
         return _parse_fused_flash_gpe_markdown_response(text)
 
+    def _get_final_reward_start(self, final_response: str) -> int:
+        marker = "# Final Translation"
+        if marker in final_response:
+            return final_response.index(marker)
+        return super()._get_final_reward_start(final_response)
+
 
 class InstFusedFlashGPEMarkdownRewardModelProcessor(FusedFlashGPERewardModelProcessor):
     """Processor for the instruct one-pass Markdown Fused FlashGPE protocol."""
 
     def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
         return _parse_inst_fused_flash_gpe_markdown_response(text)
+
+    def _get_process_reward_text(self, text: str) -> str:
+        text = text.replace("\r\n", "\n")
+        final_heading = list(re.finditer(r"(?m)^# Final Translation[ \t]*$", text))[-1]
+        return text[:final_heading.start()].strip()
 
 
 class FusedFlashGQMRewardModelProcessor(FusedFlashGPERewardModelProcessor):
@@ -1206,6 +1263,11 @@ class FusedFlashGPESimpleMarkdownRewardModelProcessor(FusedFlashGPERewardModelPr
 
     def _parse_response(self, text: Optional[str]) -> Optional[Tuple[List[str], str]]:
         return _parse_fused_flash_gpe_simple_markdown_response(text)
+
+    def _get_process_reward_text(self, text: str) -> str:
+        text = text.replace("\r\n", "\n")
+        final_heading = list(re.finditer(r"(?m)^# Final Translation[ \t]*$", text))[-1]
+        return text[:final_heading.start()].strip()
 
 
 class SeedXRewardModelProcessor:
