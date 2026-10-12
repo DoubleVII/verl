@@ -17,6 +17,26 @@ def normalize_match_text(value: Any, *, case_sensitive: bool = False) -> str:
     return text if case_sensitive else text.casefold()
 
 
+def _count_candidate_hits(reasoning: str, candidates: List[str]) -> int:
+    """Count distinct candidates, consuming all matches longest first per point."""
+    for codepoint in range(0x110000):
+        mask = chr(codepoint)
+        if mask not in reasoning and all(mask not in candidate for candidate in candidates):
+            break
+    else:
+        raise ValueError("No unused Unicode character is available to mask candidate matches")
+
+    remaining = reasoning
+    hits = 0
+    for candidate in sorted(candidates, key=lambda text: (-len(text), text)):
+        if candidate in remaining:
+            hits += 1
+            # An absent character prevents both overlapping matches and new
+            # matches formed by joining the text on either side of a match.
+            remaining = remaining.replace(candidate, mask)
+    return hits
+
+
 def _iter_key_points(key_points: Any) -> Iterable[Dict[str, Any]]:
     if isinstance(key_points, str):
         import json
@@ -78,16 +98,16 @@ class KeyPointProcessReward:
                 translations = [translations]
             if not isinstance(translations, list):
                 continue
-            candidates = [candidate for candidate in translations if str(candidate or "").strip()]
+            candidates = list({
+                normalized
+                for candidate in translations
+                if (normalized := normalize_match_text(candidate, case_sensitive=self.case_sensitive))
+            })
             if not candidates:
                 continue
             total_points += 1
             total_candidates += len(candidates)
-            point_hits = 0
-            for candidate in candidates:
-                normalized = normalize_match_text(candidate, case_sensitive=self.case_sensitive)
-                if normalized and normalized in reasoning:
-                    point_hits += 1
+            point_hits = _count_candidate_hits(reasoning, candidates)
             if point_hits:
                 hit_points += 1
                 hit_candidates += point_hits
