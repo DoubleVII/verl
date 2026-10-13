@@ -34,6 +34,75 @@ _FUSED_SIMPLE_CONNECTOR = (
     "Now, review the candidates and produce the best final translation."
 )
 _FUSED_SIMPLE_ANALYSIS_HEADING = "# Step-by-step Analysis"
+_FUSED_KEY_POINTS_CONNECTOR = "Now, use the key points to produce the complete final translation."
+
+
+def _parse_fused_key_points_mt_response(
+    text: Optional[str], source_text: str,
+) -> Optional[Dict[str, Any]]:
+    """Parse the FKP simple protocol without depending on the training repository."""
+    if not isinstance(text, str) or not isinstance(source_text, str):
+        return None
+    text = text.replace("\r\n", "\n").strip()
+    connectors = list(re.finditer(
+        rf"(?m)^[ \t]*{re.escape(_FUSED_SIMPLE_SEPARATOR)}[ \t]*\n{{2,}}"
+        rf"[ \t]*{re.escape(_FUSED_KEY_POINTS_CONNECTOR)}[ \t]*$", text,
+    ))
+    if len(connectors) != 1:
+        return None
+    connector = connectors[0]
+    before, after = text[:connector.start()], text[connector.end():]
+    if not before.endswith("\n\n") or not after.startswith("\n\n"):
+        return None
+
+    def split_stage(stage, heading):
+        stage = stage.strip()
+        start = re.match(rf"^{re.escape(_FUSED_SIMPLE_ANALYSIS_HEADING)}[ \t]*\n", stage)
+        bodies = list(re.finditer(rf"(?m)^{re.escape(heading)}[ \t]*$", stage))
+        if start is None or len(bodies) != 1:
+            return None
+        body = bodies[0]
+        thinking = stage[start.end():body.start()].strip()
+        response = stage[body.end():].strip()
+        return (thinking, response) if thinking and response else None
+
+    first = split_stage(before, "# Key Points")
+    second = split_stage(after, "# Final Translation")
+    if first is None or second is None:
+        return None
+    try:
+        value = json.loads(first[1])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(value, dict) or set(value) != {"key_points"}:
+        return None
+    points = value["key_points"]
+    if not isinstance(points, list):
+        return None
+    for point in points:
+        if not isinstance(point, dict) or set(point) != {"source_span", "explanation", "translations"}:
+            return None
+        span, explanation, translations = point["source_span"], point["explanation"], point["translations"]
+        if not isinstance(span, str) or not span.strip() or span not in source_text:
+            return None
+        if not isinstance(explanation, str) or not explanation.strip():
+            return None
+        if not isinstance(translations, list) or not translations:
+            return None
+        if any(not isinstance(item, str) or not item.strip() for item in translations):
+            return None
+    fence = re.fullmatch(r"```[ \t]*\r?\n(.*?)\r?\n```", second[1].strip(), re.DOTALL)
+    if fence is None:
+        return None
+    translation = fence.group(1).strip()
+    if not translation or re.search(r"(?m)^[ \t]*```", translation):
+        return None
+    final_heading = list(re.finditer(r"(?m)^# Final Translation[ \t]*$", after))[-1]
+    return {
+        "key_points_thinking": first[0], "key_points_response": first[1], "key_points": points,
+        "convergent_thinking": second[0], "convergent_response": second[1], "parsed": translation,
+        "process_reward_text": text[:connector.end() + final_heading.start()].strip(),
+    }
 
 
 def single_extract_score(output_text: str) -> Optional[float]:

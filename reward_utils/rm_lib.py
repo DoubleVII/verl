@@ -92,6 +92,7 @@ try:
         _extract_fused_markdown_candidates,
         _split_fused_simple_analysis_section,
         _parse_fused_flash_gpe_simple_markdown_response,
+        _parse_fused_key_points_mt_response,
         _parse_fused_flash_gqm_response,
         _is_valid_fused_candidate_count,
         _normalize_fused_candidate,
@@ -117,6 +118,7 @@ except ImportError:
         _extract_fused_markdown_candidates,
         _split_fused_simple_analysis_section,
         _parse_fused_flash_gpe_simple_markdown_response,
+        _parse_fused_key_points_mt_response,
         _parse_fused_flash_gqm_response,
         _is_valid_fused_candidate_count,
         _normalize_fused_candidate,
@@ -1268,6 +1270,70 @@ class FusedFlashGPESimpleMarkdownRewardModelProcessor(FusedFlashGPERewardModelPr
         text = text.replace("\r\n", "\n")
         final_heading = list(re.finditer(r"(?m)^# Final Translation[ \t]*$", text))[-1]
         return text[:final_heading.start()].strip()
+
+
+class FusedKeyPointsMTRewardModelProcessor(GroupRewardModelProcessor):
+    """Score one-pass key-point analysis/translation with optional process rewards."""
+
+    def _parse_response(self, text: Optional[str], source_text: str) -> Optional[Dict[str, Any]]:
+        return _parse_fused_key_points_mt_response(text, source_text)
+
+    def compute_scores(self, data, generate_fn):
+        total_size = data.batch.batch_size[0]
+        raw_responses = _decode_response(data, self.input_tokenizer, "none")
+        extra_info = data.non_tensor_batch.get("extra_info")
+        if extra_info is None:
+            raise ValueError("extra_info not found in batch")
+        if len(extra_info) != total_size or len(raw_responses) != total_size:
+            raise ValueError("Responses and extra_info must match batch size")
+        translations = [None] * total_size
+        response_parts = [DecodedResponse(raw=text or "", reasoning="", final=None) for text in raw_responses]
+        valid_indices = []
+        empty_key_points = 0
+        for idx, text in enumerate(raw_responses):
+            source_text = extra_info[idx].get("src_text") if isinstance(extra_info[idx], dict) else None
+            parsed = self._parse_response(text, source_text)
+            if parsed is None:
+                continue
+            valid_indices.append(idx)
+            empty_key_points += not parsed["key_points"]
+            translations[idx] = parsed["parsed"]
+            response_parts[idx] = DecodedResponse(
+                raw=text, reasoning=parsed["process_reward_text"], final=translations[idx],
+            )
+        result = compute_group_translation_scores(
+            data, generate_fn, self.tokenizer, self.input_tokenizer,
+            extractor_type="none", max_prompt_length=self.max_prompt_length,
+            prompt_type=self.prompt_type, add_example=self.add_example,
+            score_scale_factor=self.score_scale_factor, default_reward=self.default_reward,
+            overlong_buffer_cfg=self.overlong_buffer_cfg,
+            enable_language_detection=self.enable_language_detection,
+            indices=valid_indices, response_texts=translations,
+            return_reward_model_metadata=self.return_reward_model_metadata,
+        )
+        if self.return_reward_model_metadata:
+            scores_dict, prompts_dict, outputs_dict = result
+        else:
+            scores_dict, prompts_dict, outputs_dict = result, {}, {}
+        scores = [scores_dict.get(i, self.default_reward) for i in range(total_size)]
+        rm_mean = sum(scores[i] for i in valid_indices) / len(valid_indices) if valid_indices else 0.0
+        if self.process_reward_enabled:
+            scores = self._apply_key_point_rewards(data, scores, response_parts, valid_indices)
+        print(
+            "[FUSED_KEY_POINTS_MT_STATS] "
+            f"total={total_size} valid={len(valid_indices)} "
+            f"parse_failed={total_size - len(valid_indices)} empty_key_points={empty_key_points} "
+            f"mt_score_mean={rm_mean:.6f}"
+        )
+        if not self.return_reward_model_metadata:
+            return scores
+        return RewardProcessorOutput(
+            scores=scores,
+            non_tensor_batch={
+                REWARD_MODEL_PROMPTS_KEY: [prompts_dict.get(i) for i in range(total_size)],
+                REWARD_MODEL_RESPONSES_KEY: [outputs_dict.get(i, "") for i in range(total_size)],
+            },
+        )
 
 
 class SeedXRewardModelProcessor:
