@@ -90,14 +90,115 @@ def test_reward_decomposition(prediction):
     )
 
 
+def read_summary(capsys):
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("[hard_prediction_reward] ")
+    return json.loads(lines[0].split(" ", 1)[1])
 
 
+def test_batch_log_mixed_outputs(capsys):
+    predictions = [annotation("one", score=7), annotation(), annotation("one"), "bad", "{}", "[]"]
+    references = [
+        annotation("one"),
+        annotation("one", score=9),
+        annotation(),
+        annotation(),
+        annotation("one"),
+        annotation(),
+    ]
+    outputs = compute_score_batch(
+        ["x"] * 6,
+        [json.dumps(p) if isinstance(p, dict) else p for p in predictions],
+        references,
+        [dict(src_text="one")] * 6,
+        score_scale_factor=2,
+    )
+    summary = read_summary(capsys)
+    assert summary["batch_size"] == 6
+    assert summary["parser_pass_pct"] == pytest.approx(100 * 4 / 6)
+    assert summary["valid_output_pct"] == 50
+    assert summary["parser_failure_count"] == 2
+    assert summary["validation_failure_count"] == 1
+    for key, mean in summary["batch_mean"].items():
+        assert mean == pytest.approx(sum(o[key] for o in outputs) / 6)
+    for key, mean in summary["valid_mean"].items():
+        assert mean == pytest.approx(sum(o[key] for o in outputs if o["valid_output"]) / 3)
+    assert summary["matched"] == dict(count=1, difficulty_mae=2, difficulty_bias=2)
+    assert summary["high_confidence"] == summary["matched"]
+    assert summary["empty_reference"]["valid_count"] == 1
+    assert summary["empty_reference"]["sentence_error_rate"] == 1
+    assert summary["nonempty_reference"]["valid_count"] == 2
+    assert summary["nonempty_reference"]["sentence_error_rate"] == 0.5
+    assert summary["parameters"] == dict(
+        miss_penalty_weight=0.2, difficulty_weight=0.3, difficulty_tau=2, score_scale_factor=2
+    )
+    assert summary["batch_mean"]["score"] == pytest.approx(
+        2
+        * (
+            summary["batch_mean"]["joint_reward"]
+            - summary["batch_mean"]["miss_penalty"]
+            - summary["batch_mean"]["invalid_output_penalty"]
+        )
+    )
 
 
+def test_batch_log_pooled_errors_and_parser_formats(capsys):
+    gold = annotation("one", "two", score=5)
+    first, second = annotation("one", "two", score=7), annotation("one", score=1)
+    text = "# Step-by-step Analysis\nReasoning\n# Final JSON\n```json\n" + json.dumps(second) + "\n```"
+    compute_score_batch(
+        ["x"] * 2,
+        [json.dumps(first), text],
+        [gold] * 2,
+        [dict(src_text="one two"), dict(src_text="one two", response_format="analysis_codeblock")],
+    )
+    summary = read_summary(capsys)
+    assert summary["parser_pass_pct"] == summary["valid_output_pct"] == 100
+    assert summary["matched"]["count"] == 3
+    assert summary["matched"]["difficulty_mae"] == pytest.approx(8 / 3)
+    assert summary["matched"]["difficulty_bias"] == 0
+    assert summary["high_confidence"] == summary["matched"]
 
 
+@pytest.mark.parametrize("invalid_count", [0, 2])
+def test_empty_or_invalid_batch_log(capsys, invalid_count):
+    compute_score_batch(
+        ["x"] * invalid_count,
+        ["bad"] * invalid_count,
+        [annotation()] * invalid_count,
+        [dict(src_text="one")] * invalid_count,
+    )
+    summary = read_summary(capsys)
+    assert summary["batch_size"] == invalid_count
+    assert summary["valid_mean"]["joint_reward"] is None
+    assert summary["matched"]["difficulty_mae"] is None
+    assert summary["high_confidence"]["difficulty_bias"] is None
+    assert summary["empty_reference"]["sentence_error_rate"] is None
+    assert summary["nonempty_reference"]["mean_reward"] is None
+    assert summary["batch_mean"]["score"] == (-1 if invalid_count else None)
+    assert summary["parser_pass_pct"] == (0 if invalid_count else None)
 
 
+def test_print_controls_and_flush(capsys, monkeypatch):
+    import builtins
+
+    calls = []
+    original = builtins.print
+
+    def recording_print(*args, **kwargs):
+        calls.append(kwargs)
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "print", recording_print)
+    compute_score_batch([], [], [], [])
+    read_summary(capsys)
+    assert calls == [dict(flush=True)]
+    compute_score_batch([], [], [], [], print_batch_summary=False)
+    reward(annotation(), annotation())
+    assert capsys.readouterr().out == ""
+    with pytest.raises(ValueError):
+        compute_score_batch([], [], [], [], print_batch_summary="false")
 
 
 def test_scores_cannot_change_position_assignment_including_ties():

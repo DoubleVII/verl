@@ -242,11 +242,96 @@ def compute_score(
     return result
 
 
-def compute_score_batch(data_sources, solution_strs, ground_truths, extra_infos, **kwargs):
+def _batch_summary(results, parameters):
+    """Summarize this invocation only; missing denominators serialize as null."""
+
+    def ratio(numerator, denominator):
+        return numerator / denominator if denominator else None
+
+    def total(key, rows=results):
+        return sum(row[key] for row in rows)
+
+    def means(rows, keys):
+        return {key: ratio(total(key, rows), len(rows)) for key in keys}
+
+    valid = [row for row in results if row["valid_output"]]
+    size, parsed_count = len(results), total("parser_pass")
+    summary = dict(
+        batch_size=size,
+        parser_pass_count=parsed_count,
+        valid_output_count=len(valid),
+        parser_pass_pct=ratio(100 * parsed_count, size),
+        valid_output_pct=ratio(100 * len(valid), size),
+        parser_failure_count=size - parsed_count,
+        validation_failure_count=parsed_count - len(valid),
+        parameters=parameters,
+        batch_mean=means(
+            results,
+            ("score", "span_f1", "joint_reward", "difficulty_penalty", "miss_penalty", "invalid_output_penalty"),
+        ),
+        valid_mean=means(
+            valid,
+            (
+                "span_precision",
+                "span_recall",
+                "span_f1",
+                "joint_reward",
+                "difficulty_penalty",
+                "miss_penalty",
+                "prediction_count",
+                "reference_count",
+            ),
+        ),
+    )
+    for prefix, count_key, abs_key, error_key in (
+        ("matched", "match_count", "difficulty_abs_error_sum", "difficulty_error_sum"),
+        (
+            "high_confidence",
+            "high_confidence_match_count",
+            "high_confidence_abs_error_sum",
+            "high_confidence_error_sum",
+        ),
+    ):
+        count = total(count_key)
+        summary[prefix] = dict(
+            count=count, difficulty_mae=ratio(total(abs_key), count), difficulty_bias=ratio(total(error_key), count)
+        )
+    for group, error_key in (
+        ("empty_reference", "false_positive_nonempty_count"),
+        ("nonempty_reference", "false_negative_empty_count"),
+    ):
+        count, valid_count = total(group + "_count"), total("valid_" + group + "_count")
+        summary[group] = dict(
+            count=count,
+            mean_reward=ratio(total(group + "_reward_sum"), count),
+            valid_count=valid_count,
+            sentence_error_count=total(error_key),
+            sentence_error_rate=ratio(total(error_key), valid_count),
+        )
+    return summary
+
+
+def compute_score_batch(data_sources, solution_strs, ground_truths, extra_infos, *, print_batch_summary=True, **kwargs):
     """Batch adapter; reject unequal lengths instead of silently dropping samples."""
     if len({len(values) for values in (data_sources, solution_strs, ground_truths, extra_infos)}) != 1:
         raise ValueError("Reward batch inputs must have equal lengths")
-    return [
+    if type(print_batch_summary) is not bool:
+        raise ValueError("print_batch_summary must be a boolean")
+    results = [
         compute_score(source, solution, truth, info, **kwargs)
         for source, solution, truth, info in zip(data_sources, solution_strs, ground_truths, extra_infos, strict=True)
     ]
+    if print_batch_summary:
+        parameters = {
+            key: kwargs.get(key, default)
+            for key, default in (
+                ("miss_penalty_weight", 0.2),
+                ("difficulty_weight", 0.3),
+                ("difficulty_tau", 2.0),
+                ("score_scale_factor", 1.0),
+            )
+        }
+        print(
+            "[hard_prediction_reward] " + json.dumps(_batch_summary(results, parameters), allow_nan=False), flush=True
+        )
+    return results

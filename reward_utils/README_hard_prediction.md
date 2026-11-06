@@ -84,6 +84,7 @@ custom_reward_function.name=compute_score_batch \
 +custom_reward_function.reward_kwargs.difficulty_weight=0.3 \
 +custom_reward_function.reward_kwargs.difficulty_tau=2.0 \
 +custom_reward_function.reward_kwargs.miss_penalty_weight=0.2 \
++custom_reward_function.reward_kwargs.print_batch_summary=True \
 +custom_reward_function.reward_kwargs.score_scale_factor=1.0
 ```
 
@@ -155,3 +156,35 @@ Both parsers apply the same strict annotation checks and reward formula.
   false-positive / false-negative rates among valid outputs. Report `valid_output`
   coverage too. Invalid outputs have zero localization/count diagnostics and are
   excluded from these two valid-output rates. Zero denominators mean unavailable.
+
+## Batch summary logging
+
+`compute_score_batch` prints one JSON line prefixed `[hard_prediction_reward]`
+per successful invocation, with `flush=True`. Set
+`+custom_reward_function.reward_kwargs.print_batch_summary=False` to disable it.
+The single-sample function does not print. Logs summarize only the current local
+batch, without cross-worker aggregation, source text or model responses.
+
+- `batch_size`, `parser_pass_count`, `valid_output_count`, `parser_pass_pct`,
+  `valid_output_pct`, `parser_failure_count`, `validation_failure_count` distinguish
+  extraction failures from strict-validation failures. Percentages range from 0 to 100.
+- `batch_mean` averages the final scaled `score` and unscaled reward components
+  over all samples, including invalid outputs; the reward decomposition above also
+  holds for these batch means. `valid_mean` reports localization, reward components
+  and prediction/reference counts averaged over strictly valid samples only.
+- `matched` and `high_confidence` report counts, pooled difficulty MAE and signed
+  bias. They divide summed errors by the total matching count, rather than taking
+  the average of per-sample error means.
+- `empty_reference` and `nonempty_reference` contain sample count, mean scaled
+  reward (including invalid outputs), valid-output count, sentence error count and
+  sentence error rate. The error is a nonempty prediction for an empty reference,
+  or an empty prediction for a nonempty reference. Rates use the corresponding
+  valid-output count and range from 0 to 1.
+- `parameters` records β (`miss_penalty_weight`), λ (`difficulty_weight`), τ
+  (`difficulty_tau`) and `score_scale_factor`.
+
+Unavailable means/rates serialize as JSON `null`, including on an empty batch,
+which returns `[]` and still prints its zero-count summary. Per-sample numeric
+diagnostics retain zero values for unavailable errors for verl compatibility.
+Class balance and exploration can still favor always-empty or always-nonempty
+policies; inspect group rewards and sentence error rates alongside mean reward.
