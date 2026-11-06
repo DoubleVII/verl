@@ -56,13 +56,24 @@ def validate_annotation(value, source, *, max_span_chars=48, max_span_words=8):
     return dict(analysis=value["analysis"], score=value["score"], spans=spans)
 
 
-def _parse_response(text):
+def _parse_response(text, response_format="json"):
     if not isinstance(text, str):
         return None
     if "</think>" in text:
         text = text.split("</think>", 1)[1]
     text = text.strip()
-    if text.startswith("```"):
+    if response_format == "analysis_codeblock":
+        # Same explicit envelope as GRRM utils/difficulty_response.py.
+        match = re.fullmatch(
+            r"\s*# Step-by-step Analysis\s*\n(.+?)\n# Final JSON\s*\n"
+            r"```json[ \t]*\n(.*?)\n```\s*",
+            text,
+            re.DOTALL,
+        )
+        if not match or not match[1].strip() or "```" in match[1]:
+            return None
+        text = match[2]
+    elif text.startswith("```"):
         match = re.fullmatch(r"```(?:json)?[ \t]*\n(.*?)\n```", text, re.DOTALL)
         if not match:
             return None
@@ -82,6 +93,8 @@ def compute_score(
     difficulty_weight=0.3,
     difficulty_tau=2.0,
     score_scale_factor=1.0,
+    response_format=None,
+    miss_penalty_weight=0.2,
 ):
     """Return reward and numeric diagnostics accepted by verl reward managers.
 
@@ -91,6 +104,13 @@ def compute_score(
     score_scale_factor scales final scores (including invalid-output penalties)
     and group reward sums; localization and difficulty diagnostics stay unscaled.
     """
+    if (
+        isinstance(miss_penalty_weight, bool)
+        or not isinstance(miss_penalty_weight, (int, float))
+        or not math.isfinite(miss_penalty_weight)
+        or miss_penalty_weight < 0
+    ):
+        raise ValueError("miss_penalty_weight must be finite and nonnegative")
     if (
         isinstance(score_scale_factor, bool)
         or not isinstance(score_scale_factor, (int, float))
@@ -119,6 +139,9 @@ def compute_score(
     ):
         raise ValueError("extra_info must contain nonempty src_text")
     limits = _limits(extra_info)
+    response_format = response_format if response_format is not None else extra_info.get("response_format", "json")
+    if response_format not in ("json", "analysis_codeblock"):
+        raise ValueError("response_format must be json or analysis_codeblock")
     try:
         reference = json.loads(ground_truth) if isinstance(ground_truth, str) else ground_truth
     except (ValueError, TypeError) as error:
@@ -127,10 +150,16 @@ def compute_score(
     reference = validate_annotation(reference, source, **limits)
     if reference is None:
         raise ValueError("Invalid reference annotation")
-    prediction = validate_annotation(_parse_response(solution_str), source, **limits)
+    parsed = _parse_response(solution_str, response_format)
+    prediction = validate_annotation(parsed, source, **limits)
     m = len(reference["spans"])
     result = dict(
         score=-1.0,
+        parser_pass=int(isinstance(parsed, dict)),
+        joint_reward=0.0,
+        difficulty_penalty=0.0,
+        miss_penalty=0.0,
+        invalid_output_penalty=int(prediction is None),
         valid_output=int(prediction is not None),
         span_precision=0.0,
         span_recall=0.0,
@@ -170,8 +199,19 @@ def compute_score(
             )
             for i, j, w in matching
         )
+        joint_reward = 2 * contribution / (n + m) if n + m else 1.0
+        coverage = {j: w for _, j, w in matching}
+        miss_penalty = (
+            miss_penalty_weight
+            * sum(span["score"] / 10 * (1 - coverage.get(j, 0.0)) for j, span in enumerate(gold))
+            / m
+            if m
+            else 0.0
+        )
         result.update(
-            score=2 * contribution / (n + m) if n + m else 1.0,
+            joint_reward=joint_reward,
+            difficulty_penalty=proxy["f1"] - joint_reward,
+            miss_penalty=miss_penalty,
             prediction_count=n,
             match_count=len(matching),
             span_precision=proxy["precision"],
@@ -195,7 +235,9 @@ def compute_score(
                 )
             else:
                 result.update(difficulty_abs_error_sum=absolute, difficulty_error_sum=signed)
-    result["score"] *= score_scale_factor
+    result["score"] = score_scale_factor * (
+        result["joint_reward"] - result["miss_penalty"] - result["invalid_output_penalty"]
+    )
     result["empty_reference_reward_sum" if m == 0 else "nonempty_reference_reward_sum"] = result["score"]
     return result
 
