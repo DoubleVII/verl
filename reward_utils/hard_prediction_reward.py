@@ -59,9 +59,21 @@ def validate_annotation(value, source, *, max_span_chars=48, max_span_words=8):
 def _parse_response(text, response_format="json"):
     if not isinstance(text, str):
         return None
-    if "</think>" in text:
-        text = text.split("</think>", 1)[1]
     text = text.strip()
+    # This task has no tool calls. Never discard arbitrary prefixes merely
+    # because a closing thinking tag occurs later in the response.
+    if re.search(r"<\s*/?\s*tool_call\b", text, re.IGNORECASE):
+        return None
+    if re.search(r"<\s*/?\s*think\b", text, re.IGNORECASE):
+        if text.count("<think>") != 1 or text.count("</think>") != 1:
+            return None
+        match = re.fullmatch(r"<think>(.*?)</think>\s*(.+)", text, re.DOTALL)
+        if not match or not match[1].strip() or not match[2].strip():
+            return None
+        # Reject malformed/nested tags as well as duplicate exact tags.
+        if any(re.search(r"<\s*/?\s*think\b", part, re.IGNORECASE) for part in match.groups()):
+            return None
+        text = match[2].strip()
     if response_format == "analysis_codeblock":
         # Same explicit envelope as GRRM utils/difficulty_response.py.
         match = re.fullmatch(
