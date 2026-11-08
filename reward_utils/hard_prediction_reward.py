@@ -56,7 +56,16 @@ def validate_annotation(value, source, *, max_span_chars=48, max_span_words=8):
     return dict(analysis=value["analysis"], score=value["score"], spans=spans)
 
 
-def _parse_response(text, response_format="json"):
+def _validate_think_tag(think_tag):
+    if not isinstance(think_tag, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", think_tag):
+        raise ValueError("think_tag must match [A-Za-z][A-Za-z0-9_-]* (without angle brackets)")
+    return think_tag
+
+
+def _parse_response(text, response_format="json", think_tag="think"):
+    _validate_think_tag(think_tag)
+    opening, closing = f"<{think_tag}>", f"</{think_tag}>"
+    tag_pattern = rf"<\s*/?\s*{re.escape(think_tag)}(?![A-Za-z0-9_-])"
     if not isinstance(text, str):
         return None
     text = text.strip()
@@ -64,14 +73,14 @@ def _parse_response(text, response_format="json"):
     # because a closing thinking tag occurs later in the response.
     if re.search(r"<\s*/?\s*tool_call\b", text, re.IGNORECASE):
         return None
-    if re.search(r"<\s*/?\s*think\b", text, re.IGNORECASE):
-        if text.count("<think>") != 1 or text.count("</think>") != 1:
+    if re.search(tag_pattern, text, re.IGNORECASE):
+        if text.count(opening) != 1 or text.count(closing) != 1:
             return None
-        match = re.fullmatch(r"<think>(.*?)</think>\s*(.+)", text, re.DOTALL)
+        match = re.fullmatch(rf"{re.escape(opening)}(.*?){re.escape(closing)}\s*(.+)", text, re.DOTALL)
         if not match or not match[1].strip() or not match[2].strip():
             return None
         # Reject malformed/nested tags as well as duplicate exact tags.
-        if any(re.search(r"<\s*/?\s*think\b", part, re.IGNORECASE) for part in match.groups()):
+        if any(re.search(tag_pattern, part, re.IGNORECASE) for part in match.groups()):
             return None
         text = match[2].strip()
     if response_format == "analysis_codeblock":
@@ -106,11 +115,13 @@ def compute_score(
     difficulty_tau=2.0,
     score_scale_factor=1.0,
     response_format=None,
+    think_tag=None,
     miss_penalty_weight=0.2,
 ):
     """Return reward and numeric diagnostics accepted by verl reward managers.
 
     Missing/corrupt reference metadata raises; invalid model outputs score -1.
+    think_tag overrides extra_info.think_tag; legacy metadata defaults to think.
     Error means are zero when their corresponding match count is zero.
     Group sums/counts allow pooled empty/nonempty rates without NaN metrics.
     score_scale_factor scales final scores (including invalid-output penalties)
@@ -150,6 +161,7 @@ def compute_score(
         or not extra_info["src_text"].strip()
     ):
         raise ValueError("extra_info must contain nonempty src_text")
+    think_tag = _validate_think_tag(think_tag if think_tag is not None else extra_info.get("think_tag", "think"))
     limits = _limits(extra_info)
     response_format = response_format if response_format is not None else extra_info.get("response_format", "json")
     if response_format not in ("json", "analysis_codeblock"):
@@ -162,7 +174,7 @@ def compute_score(
     reference = validate_annotation(reference, source, **limits)
     if reference is None:
         raise ValueError("Invalid reference annotation")
-    parsed = _parse_response(solution_str, response_format)
+    parsed = _parse_response(solution_str, response_format, think_tag)
     prediction = validate_annotation(parsed, source, **limits)
     m = len(reference["spans"])
     result = dict(
