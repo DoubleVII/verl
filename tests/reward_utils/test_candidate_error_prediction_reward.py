@@ -186,3 +186,70 @@ def test_grrm_parser_and_validation_parity():
         reward(pred("one"), calibration_weight=0, miss_penalty_weight=0)["score"]
         == score_spans(SOURCE, pred("one")["spans"], gold("one")["spans"])["f1"]
     )
+
+
+@pytest.mark.parametrize("metric", ["f1", "f2"])
+@pytest.mark.parametrize(
+    "p,g,f1,f2",
+    [
+        (pred(), gold(), 1, 1),
+        (pred(), gold("one"), 0, 0),
+        (pred("one"), gold(), 0, 0),
+        (pred("one"), gold("one"), 1, 1),
+        (pred("one"), gold("four"), 0, 0),
+        (pred("one"), gold("one", "two"), 2 / 3, 5 / 9),
+        (pred("one", "two"), gold("one"), 2 / 3, 5 / 6),
+        (pred("one", "one"), gold("one"), 2 / 3, 5 / 6),
+        (pred("one two"), gold("one", "four"), 2 * math.sqrt(0.5) / 3, 5 * math.sqrt(0.5) / 9),
+    ],
+)
+def test_localization_metric_and_penalties(metric, p, g, f1, f2):
+    row = reward(p, g, localization_metric=metric, miss_penalty_weight=0.6, score_scale_factor=2)
+    baseline = reward(p, g, miss_penalty_weight=0.6, score_scale_factor=2)
+    assert row["span_f1"] == pytest.approx(f1)
+    assert row["span_f2"] == pytest.approx(f2)
+    assert row["localization_reward"] == pytest.approx(f1 if metric == "f1" else f2)
+    for key in ("calibration_loss", "calibration_penalty", "miss_penalty", "match_count"):
+        assert row[key] == baseline[key]
+    assert row["score"] == pytest.approx(
+        2 * (row["localization_reward"] - row["calibration_penalty"] - row["miss_penalty"])
+    )
+    if not p["spans"] and g["spans"]:
+        assert row["score"] == -1.2
+    if metric == "f1":
+        assert row == baseline
+
+
+@pytest.mark.parametrize("metric", [None, True, 2, "F2", "f3", []])
+def test_invalid_localization_metric(metric):
+    with pytest.raises(ValueError, match="localization_metric"):
+        reward(pred(), localization_metric=metric)
+
+
+@pytest.mark.parametrize("metric", ["f1", "f2"])
+def test_localization_batch_and_invalid_output(metric, capsys):
+    ps = [pred("one"), pred("one", "two"), "bad"]
+    gs = [gold("one", "two"), gold("one"), gold("one")]
+    rows = compute_score_batch(
+        ["x"] * 3,
+        [json.dumps(p) if isinstance(p, dict) else p for p in ps],
+        gs,
+        [dict(src_text=SOURCE)] * 3,
+        localization_metric=metric,
+        miss_penalty_weight=0.6,
+    )
+    assert rows == [
+        reward(p, g, localization_metric=metric, miss_penalty_weight=0.6) for p, g in zip(ps, gs, strict=True)
+    ]
+    assert rows[-1]["score"] == -1
+    assert rows[-1]["localization_reward"] == rows[-1]["span_f2"] == 0
+    summary = json.loads(capsys.readouterr().out.split(" ", 1)[1])
+    assert summary["parameters"]["localization_metric"] == metric
+    assert summary["parameters"]["miss_penalty_weight"] == 0.6
+    means = summary["batch_mean"]
+    assert means["score"] == pytest.approx(
+        means["localization_reward"]
+        - means["calibration_penalty"]
+        - means["miss_penalty"]
+        - means["invalid_output_penalty"]
+    )

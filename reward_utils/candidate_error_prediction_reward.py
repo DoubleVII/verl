@@ -67,13 +67,19 @@ def compute_score(
     miss_penalty_weight=0.2,
     score_scale_factor=1.0,
     think_tag=None,
+    localization_metric="f1",
 ):
     """Return a scaled reward and unscaled numeric diagnostics.
 
     Reference/configuration errors raise; malformed predictions receive -1 * scale.
     Calibration sum uses a fixed reference denominator so extra zero-score predictions
     cannot dilute existing calibration errors. Valid rewards have no fixed lower bound.
+    localization_metric selects f1 (default) or recall-oriented f2; assignment and
+    calibration targets remain position-only. localization_reward is the selected
+    unscaled component; span_f1 and span_f2 always report their respective metrics.
     """
+    if localization_metric not in ("f1", "f2"):
+        raise ValueError("localization_metric must be f1 or f2")
     for name, value in (
         ("calibration_weight", calibration_weight),
         ("miss_penalty_weight", miss_penalty_weight),
@@ -101,6 +107,8 @@ def compute_score(
         span_precision=0.0,
         span_recall=0.0,
         span_f1=0.0,
+        span_f2=0.0,
+        localization_reward=0.0,
         prediction_count=0,
         reference_count=m,
         match_count=0,
@@ -123,6 +131,8 @@ def compute_score(
         spans = prediction["spans"]
         n = len(spans)
         proxy = score_spans(source, spans, gold)
+        # With soft TP, FP=n-TP and FN=m-TP, F2 simplifies to 5*TP/(n+4*m).
+        f2 = 5 * proxy["tp"] / (n + 4 * m) if n + m else 1.0
         targets = {i: w for i, _, w in proxy["matching"]}
         coverage = {j: w for _, j, w in proxy["matching"]}
         errors = sum((span["confidence"] - targets.get(i, 0.0)) ** 2 for i, span in enumerate(spans))
@@ -132,6 +142,8 @@ def compute_score(
             span_precision=proxy["precision"],
             span_recall=proxy["recall"],
             span_f1=proxy["f1"],
+            span_f2=f2,
+            localization_reward=proxy["f1"] if localization_metric == "f1" else f2,
             prediction_count=n,
             match_count=len(proxy["matching"]),
             calibration_loss=calibration,
@@ -146,7 +158,10 @@ def compute_score(
             false_negative_empty_count=int(m > 0 and n == 0),
         )
     result["score"] = score_scale_factor * (
-        result["span_f1"] - result["calibration_penalty"] - result["miss_penalty"] - result["invalid_output_penalty"]
+        result["localization_reward"]
+        - result["calibration_penalty"]
+        - result["miss_penalty"]
+        - result["invalid_output_penalty"]
     )
     result["empty_reference_reward_sum" if m == 0 else "nonempty_reference_reward_sum"] = result["score"]
     return result
@@ -175,6 +190,8 @@ def _batch_summary(results, parameters):
             for key in (
                 "score",
                 "span_f1",
+                "span_f2",
+                "localization_reward",
                 "calibration_loss",
                 "calibration_penalty",
                 "miss_penalty",
@@ -209,7 +226,12 @@ def compute_score_batch(data_sources, solution_strs, ground_truths, extra_infos,
     if print_batch_summary:
         parameters = {
             key: kwargs.get(key, default)
-            for key, default in (("calibration_weight", 0.3), ("miss_penalty_weight", 0.2), ("score_scale_factor", 1.0))
+            for key, default in (
+                ("calibration_weight", 0.3),
+                ("miss_penalty_weight", 0.2),
+                ("score_scale_factor", 1.0),
+                ("localization_metric", "f1"),
+            )
         }
         print(
             "[candidate_error_prediction_reward] " + json.dumps(_batch_summary(results, parameters), allow_nan=False),
