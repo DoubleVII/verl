@@ -1,0 +1,10 @@
+tools:
+  - class_name: verl.tools.translation_search_tool.TranslationSearchTool
+    config:
+      type: native
+      # Override with your reachable address; can also use SEARCH_SERVICE_URL env.
+      service_url: ${oc.env:SEARCH_SERVICE_URL,http://127.0.0.1:8080}
+      api_key_env: SEARCH_SERVICE_API_KEY
+      timeout: 130
+      max_concurrency: 16
+      max_response_chars: 24000
