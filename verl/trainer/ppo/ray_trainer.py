@@ -988,7 +988,9 @@ class RayPPOTrainer:
         batch_size = attention_mask.shape[0]
         global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1)  # (train_batch_size,)
         global_seqlen_lst = calculate_workload(global_seqlen_lst)
-        if keep_group and not keep_minibatch:
+        if keep_group and keep_minibatch:
+            raise ValueError("keep_group and keep_minibatch cannot be combined")
+        if keep_group:
             try:
                 dp_rank_mapping = self.rm_wg._query_dispatch_info("rollout")
                 dp_size = max(dp_rank_mapping) + 1
@@ -998,7 +1000,7 @@ class RayPPOTrainer:
 
             uids = batch.non_tensor_batch.get("uid")
             if uids is None:
-                uids = np.array([str(i) for i in range(batch_size)], dtype=object)
+                raise ValueError("reward_model.keep_group requires uid metadata")
 
             uid_to_indices = {}
             for i in range(batch_size):
@@ -1016,7 +1018,8 @@ class RayPPOTrainer:
             groups.sort(key=lambda x: (x[2], x[1][0]))
             groups = groups[::-1]
 
-            assert batch_size % dp_size == 0
+            if batch_size % dp_size:
+                raise ValueError("Reward batch size must be divisible by RM data-parallel size")
             chunk_size = batch_size // dp_size
             partitions = [[] for _ in range(dp_size)]
             part_work = [0 for _ in range(dp_size)]
@@ -1033,10 +1036,13 @@ class RayPPOTrainer:
                         placed = True
                         break
                 if not placed:
-                    k = max(range(dp_size), key=lambda x: part_remaining[x])
-                    partitions[k].append((uid, idxs, work))
-                    part_work[k] += work
-                    part_remaining[k] -= len(idxs)
+                    raise ValueError(
+                        "Cannot keep complete reward groups in equal RM dispatch chunks: "
+                        f"group size={len(idxs)}, chunk size={chunk_size}, remaining={part_remaining}. "
+                        "Use a uniform rollout.n and a prompt batch divisible by RM data-parallel size."
+                    )
+            if any(part_remaining):
+                raise ValueError("Incomplete equal-size RM partitions")
 
             global_partition_lst = []
             for idx, partition in enumerate(partitions):
@@ -1069,6 +1075,16 @@ class RayPPOTrainer:
                 partition.sort(key=lambda x: (global_seqlen_lst[x], x))
                 ordered_partition = partition[::2] + partition[1::2][::-1]
                 global_partition_lst[idx] = ordered_partition
+        if keep_group:
+            owners = {}
+            for rank, partition in enumerate(global_partition_lst):
+                if len(partition) != chunk_size:
+                    raise ValueError("RM dispatch partition size mismatch")
+                for idx in partition:
+                    uid = uids[idx]
+                    if uid in owners and owners[uid] != rank:
+                        raise ValueError(f"Reward uid {uid} split across RM dispatch chunks")
+                    owners[uid] = rank
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
         global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
         batch.reorder(global_idx)
@@ -1279,8 +1295,13 @@ class RayPPOTrainer:
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics, keep_group=self.config.reward_model.get("keep_group", False))
+                    keep_reward_group = self.config.reward_model.get("keep_group", False)
+                    if keep_reward_group:
+                        if "rm_scores" in batch.batch:
+                            raise ValueError("keep_group cannot use rewards computed per trajectory before batch balancing")
+                        batch.meta_info["reward_group_size"] = self.config.actor_rollout_ref.rollout.n
+                    if self.config.trainer.balance_batch or keep_reward_group:
+                        self._balance_batch(batch, metrics=metrics, keep_group=keep_reward_group)
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
