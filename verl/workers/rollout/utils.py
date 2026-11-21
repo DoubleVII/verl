@@ -14,7 +14,6 @@
 import asyncio
 import ipaddress
 import logging
-import os
 import socket
 
 import uvicorn
@@ -46,23 +45,47 @@ def get_free_port(address: str) -> tuple[int, socket.socket]:
 
 
 async def run_unvicorn(app: FastAPI, server_args, server_address, max_retries=5) -> tuple[int, asyncio.Task]:
-    server_port, server_task = None, None
-
+    """Start HTTP serving in the background and return only after it is listening."""
     for i in range(max_retries):
+        sock, server_task = None, None
+        ready = False
         try:
             server_port, sock = get_free_port(server_address)
             app.server_args = server_args
             config = uvicorn.Config(app, host=server_address, port=server_port, log_level="warning")
             server = uvicorn.Server(config)
-            server.should_exit = True
-            await server.serve()
-            server_task = asyncio.create_task(server.main_loop())
-            break
-        except (OSError, SystemExit) as e:
-            logger.error(f"Failed to start HTTP server on port {server_port} at try {i}, error: {e}")
-    else:
-        logger.error(f"Failed to start HTTP server after {max_retries} retries, exiting...")
-        os._exit(-1)
 
-    logger.info(f"HTTP server started on port {server_port}")
-    return server_port, server_task
+            async def serve_http(server=server, sock=sock):
+                try:
+                    # Use the reserved socket so another process cannot take the port.
+                    # Keep serve() running: it owns startup, the main loop and shutdown.
+                    await server.serve(sockets=[sock])
+                except asyncio.CancelledError:
+                    if server.started:
+                        await server.shutdown(sockets=[sock])
+                    raise
+                finally:
+                    sock.close()
+
+            server_task = asyncio.create_task(serve_http())
+            while not server.started and not server_task.done():
+                await asyncio.sleep(0.01)
+            if server_task.done():
+                # Propagate startup errors instead of advertising an unreachable port.
+                await server_task
+                raise RuntimeError("HTTP server exited before startup completed")
+
+            ready = True
+            logger.info(f"HTTP server started on port {server_port}")
+            return server_port, server_task
+        except (OSError, SystemExit) as e:
+            logger.error(f"Failed to start HTTP server at {server_address} on try {i}, error: {e}")
+        finally:
+            if not ready:
+                if server_task is not None:
+                    server_task.cancel()
+                    await asyncio.gather(server_task, return_exceptions=True)
+                if sock is not None:
+                    sock.close()
+
+    raise RuntimeError(f"Failed to start HTTP server at {server_address} after {max_retries} retries")
