@@ -15,6 +15,7 @@
 The main entry point to run the PPO algorithm
 """
 
+import asyncio
 import datetime
 import json
 import logging
@@ -2255,6 +2256,179 @@ class GenerativeRewardModelWorker(ActorRolloutRefWorker):
         return token_level_scores
 
     
+
+class AsyncGenerativeRewardModelWorker(GenerativeRewardModelWorker):
+    """Hybrid GenRM with awaitable lifecycle calls and synchronous batched vLLM scoring.
+
+    The synchronous worker is retained for existing jobs. This implementation can
+    share a Ray async actor with policy rollout without nesting event loops.
+    """
+
+    def __init__(self, config: DictConfig, **kwargs):
+        super().__init__(config, **kwargs)
+        self._reward_score_lock = asyncio.Lock()
+
+    def _build_rollout(self, trust_remote_code=False):
+        from torch.distributed.device_mesh import init_device_mesh
+
+        # 1. parse rollout and huggingface model config
+        rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout, dataclass_type=RolloutConfig)
+        model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model, dataclass_type=HFModelConfig)
+        self.model_config = model_config
+
+        # 2. build rollout device mesh
+        infer_tp = self.config.rollout.tensor_model_parallel_size * self.config.rollout.data_parallel_size
+        infer_pp = self.config.rollout.pipeline_model_parallel_size
+        infer_world_size = infer_tp * infer_pp
+        dp = self.world_size // infer_world_size
+        assert self.world_size % infer_world_size == 0, (
+            f"rollout world_size: {self.world_size} is not divisible by infer_world_size: {infer_world_size}"
+        )
+        rollout_device_mesh = init_device_mesh(
+            device_name, mesh_shape=(dp, infer_tp, infer_pp), mesh_dim_names=["dp", "infer_tp", "infer_pp"]
+        )
+        rollout_name = self.config.rollout.name
+
+        if rollout_name == "hf":
+            self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
+        else:
+            is_collect = (
+                rollout_device_mesh["infer_tp"].get_local_rank() == 0
+                and rollout_device_mesh["infer_pp"].get_local_rank() == 0
+            )
+            self._register_dispatch_collect_info(
+                "rollout", dp_rank=rollout_device_mesh["dp"].get_local_rank(), is_collect=is_collect
+            )
+
+        # 3. init trainer and rollout random states
+        self.torch_random_states = get_torch_device().get_rng_state()
+        gen_dp_rank = rollout_device_mesh["dp"].get_local_rank()
+        get_torch_device().manual_seed(gen_dp_rank + 1000)  # make sure all tp ranks have the same random states
+        self.gen_random_states = get_torch_device().get_rng_state()
+        get_torch_device().set_rng_state(self.torch_random_states)
+
+        # 4. build rollout model
+        log_gpu_memory_usage(f"Before building {self.config.rollout.name} rollout", logger=logger)
+        self.rollout = get_rollout_class(rollout_config.name, rollout_config.mode)(
+            config=rollout_config, model_config=model_config, device_mesh=rollout_device_mesh
+        )
+        log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=logger)
+
+        # Full params
+        if torch.distributed.get_world_size() == 1 and fsdp_version(self.actor_module_fsdp) == 1:
+            FSDP.set_state_dict_type(
+                self.actor_module_fsdp,
+                state_dict_type=StateDictType.FULL_STATE_DICT,
+                state_dict_config=FullStateDictConfig(),
+            )
+        elif fsdp_version(self.actor_module_fsdp) == 1:
+            FSDP.set_state_dict_type(
+                self.actor_module_fsdp,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig(),
+            )
+
+        # used for LoRA
+        self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
+        self.layered_summon = self.config.rollout.get("layered_summon", False)
+
+        # The async init_model entrypoint awaits trainer_mode after model setup.
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def init_model(self):
+        super().init_model()
+        await self.trainer_mode()
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
+    async def compute_rm_score(self, data: DataProto):
+        async with self._reward_score_lock:
+            return await self._compute_rm_score(data)
+
+    async def _compute_rm_score(self, data: DataProto):
+        data = data.to(get_device_id())
+        data.meta_info.update(
+            {
+                "eos_token_id": self.generation_config.eos_token_id
+                if self.generation_config is not None
+                else self.tokenizer.eos_token_id,
+                "pad_token_id": self.generation_config.pad_token_id
+                if self.generation_config is not None
+                else self.tokenizer.pad_token_id,
+            }
+        )
+        if not self.custom_processor or not hasattr(self.custom_processor, "compute_scores"):
+            raise NotImplementedError("Please provide a custom_processor with compute_scores method.")
+
+        timing_generate = {}
+        scoring_error = None
+        try:
+            await self.rollout_mode()
+            log_gpu_memory_usage("After switch to rollout mode", logger=logger)
+            with simple_timer("generate_rewards", timing_generate):
+                reward_result = self._compute_reward_scores(data)
+            reward_metadata = getattr(reward_result, "non_tensor_batch", {})
+            reward_scores = getattr(reward_result, "scores", reward_result)
+            if not isinstance(reward_scores, torch.Tensor):
+                reward_tensor = torch.tensor(reward_scores, dtype=torch.float32)
+            else:
+                reward_tensor = reward_scores
+        except BaseException as exc:
+            scoring_error = exc
+            raise
+        finally:
+            try:
+                await self.trainer_mode()
+                log_gpu_memory_usage("After switch to trainer mode", logger=logger)
+            except BaseException:
+                if scoring_error is None:
+                    raise
+                logger.exception("Failed to restore GenRM trainer mode after scoring failure")
+
+        # We calculate the average timing across all ranks
+        # to make sure meta_info["timing"] is the same
+        timing_generate_topk_ratio, timing_generate_min, timing_generate_max = topk_reduce_ratio_min_max(
+            timing_generate["generate_rewards"]
+        )
+        timing_generate = reduce_timing(timing_generate)
+        timing_generate.update(
+            {
+                "reward_timing/max": timing_generate_max,
+                "reward_timing/min": timing_generate_min,
+                "reward_timing/topk_ratio": timing_generate_topk_ratio,
+            }
+        )
+
+        token_level_scores = self._expand_to_token_level(data, reward_tensor)
+        # Note that this is only the scores, may not be the final rewards used to train RL
+        output = DataProto.from_dict(tensors={"rm_scores": token_level_scores}, non_tensors=reward_metadata)
+        output = output.to("cpu")
+
+        # clear kv cache
+        get_torch_device().empty_cache()
+        return output
+
+    @DistProfiler.annotate(color="brown", role="reward_generate")
+    def _compute_reward_scores(self, data: DataProto):
+        generate_fn = self.rollout.generate_for_rm
+        collect_reward_model_metadata = data.meta_info.get("collect_reward_model_metadata", False)
+        metadata_attr = None
+        if hasattr(self.custom_processor, "return_reward_model_metadata"):
+            metadata_attr = "return_reward_model_metadata"
+        elif hasattr(self.custom_processor, "return_gqm_outputs"):
+            metadata_attr = "return_gqm_outputs"
+        old_return_metadata = getattr(self.custom_processor, metadata_attr, None) if metadata_attr else None
+        if collect_reward_model_metadata and metadata_attr:
+            setattr(self.custom_processor, metadata_attr, True)
+        try:
+            reward_result = self.custom_processor.compute_scores(
+                data,
+                generate_fn,
+            )
+        finally:
+            if collect_reward_model_metadata and metadata_attr:
+                setattr(self.custom_processor, metadata_attr, old_return_metadata)
+        return reward_result
+
 
 class GenerativeRewardModelRolloutWorker(Worker, DistProfilerExtension):
     """GenRM worker that lets the rollout engine load static reward-model weights directly."""

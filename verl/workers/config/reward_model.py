@@ -49,6 +49,7 @@ class RewardModelConfig(BaseConfig):
     n_gpus_per_node: int = 0
     nnodes: int = 0
     genrm_engine_mode: str = "hybrid"
+    genrm_worker_mode: str = "sync"
 
     # reward model args
     rollout: RolloutConfig = field(default_factory=RolloutConfig)

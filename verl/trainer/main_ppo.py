@@ -105,6 +105,20 @@ def run_ppo(config, task_runner_class=None) -> None:
 
 def _select_genrm_reward_model_worker(config):
     genrm_engine_mode = config.reward_model.get("genrm_engine_mode", "hybrid")
+    genrm_worker_mode = config.reward_model.get("genrm_worker_mode", "sync")
+    if genrm_worker_mode not in {"sync", "async"}:
+        raise ValueError(f"Invalid reward_model.genrm_worker_mode: {genrm_worker_mode}")
+    if genrm_worker_mode == "async":
+        rollout_name = OmegaConf.select(config, "reward_model.rollout.name")
+        rollout_mode = OmegaConf.select(config, "reward_model.rollout.mode", default="sync")
+        if genrm_engine_mode != "hybrid" or rollout_name != "vllm" or rollout_mode != "sync":
+            raise ValueError(
+                "reward_model.genrm_worker_mode=async requires genrm_engine_mode=hybrid, "
+                "reward_model.rollout.name=vllm and reward_model.rollout.mode=sync."
+            )
+        from verl.workers.fsdp_workers import AsyncGenerativeRewardModelWorker
+
+        return AsyncGenerativeRewardModelWorker
     if genrm_engine_mode == "hybrid":
         from verl.workers.fsdp_workers import GenerativeRewardModelWorker as RewardModelWorker
     elif genrm_engine_mode == "rollout":

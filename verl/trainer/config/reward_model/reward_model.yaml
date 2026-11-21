@@ -18,6 +18,10 @@ strategy: ???
 # GenRM engine mode: "hybrid" keeps FSDP-to-rollout weight sync; "rollout" loads static weights directly.
 genrm_engine_mode: hybrid
 
+# Worker lifecycle: "async" supports colocating hybrid GenRM with async policy rollout.
+# The async worker currently requires the synchronous vLLM rollout backend.
+genrm_worker_mode: sync
+
 # model config for reward scoring
 model:
 
