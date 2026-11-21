@@ -1,4 +1,4 @@
-"""Search post-edit v1 wire protocol. Mirrored in GRRM utils and verl.tools.
+"""Search post-edit v2 wire protocol. Mirrored in GRRM utils and verl.tools.
 
 Keep these two dependency-free copies identical; parity is covered by tests.
 """
@@ -6,7 +6,7 @@ Keep these two dependency-free copies identical; parity is covered by tests.
 import json
 import re
 
-VERSION = "search-post-edit-v1"
+VERSION = "search-post-edit-v2"
 TOOL_NAME = "translation_search_batch"
 TOOL_SCHEMA = {
     "type": "function",
@@ -93,29 +93,33 @@ def validate_queries(arguments, span_count):
     return {"queries": normalized}
 
 
-def strip_thinking(text):
-    text = text.strip()
-    for tag in ("think", "thinking"):
-        if text.startswith(f"<{tag}>"):
-            end = text.find(f"</{tag}>")
-            if end < 0:
-                raise ProtocolError("unclosed_thinking")
-            return text[end + len(tag) + 3 :].strip()
-    return text
+def require_analysis(text):
+    """Validate the pilot's mandatory, nonempty Analysis section."""
+    if not isinstance(text, str):
+        raise ProtocolError("missing_analysis")
+    match = re.fullmatch(r"# Analysis[ \t]*\r?\n(.+)", text.strip(), re.S)
+    if not match or not match[1].strip():
+        raise ProtocolError("missing_analysis")
+    analysis = match[1].strip()
+    if re.search(r"^# (?:Analysis|Final JSON)[ \t]*$", analysis, re.M) or re.search(
+        r"</?(?:think|thinking)>", analysis
+    ):
+        raise ProtocolError("invalid_analysis_format")
+    return analysis
 
 
 def parse_turn(content, tool_calls=None):
-    """Return ('search', arguments) or ('finish', translation), never repair output.
+    """Pilot envelope: mandatory Analysis, then native call or fenced Final JSON.
 
-    Accept native OpenAI calls or Hermes text. Exactly one batch call per round.
+    Native APIs put Analysis in content and calls in tool_calls. Hermes contains
+    both in one generated string. Never repair missing sections or invalid JSON.
     """
     if tool_calls is not None and not isinstance(tool_calls, list):
         raise ProtocolError("invalid_tool_calls")
     if tool_calls:
-        if not isinstance(tool_calls, list) or len(tool_calls) != 1:
+        if len(tool_calls) != 1:
             raise ProtocolError("expected_one_batch_call")
-        if content is not None and (not isinstance(content, str) or strip_thinking(content)):
-            raise ProtocolError("unexpected_text_around_tool_call")
+        require_analysis(content)
         call = tool_calls[0]
         if not isinstance(call, dict) or call.get("type", "function") != "function":
             raise ProtocolError("invalid_tool_call")
@@ -125,21 +129,33 @@ def parse_turn(content, tool_calls=None):
         return "search", loads(function.get("arguments"))
     if not isinstance(content, str):
         raise ProtocolError("missing_assistant_content")
-    text = strip_thinking(content)
+    text = content.strip()
     if "<tool_call>" in text or "</tool_call>" in text:
-        matches = re.findall(r"<tool_call>(.*?)</tool_call>", text, re.S)
+        matches = list(re.finditer(r"<tool_call>(.*?)</tool_call>", text, re.S))
         if len(matches) != 1 or text.count("<tool_call>") != 1 or text.count("</tool_call>") != 1:
             raise ProtocolError("expected_one_complete_batch_call")
-        remainder = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.S).strip()
-        if remainder:
-            raise ProtocolError("unexpected_text_around_tool_call")
-        call = loads(matches[0])
+        match = matches[0]
+        require_analysis(text[: match.start()])
+        if text[match.end() :].strip():
+            raise ProtocolError("unexpected_text_after_tool_call")
+        call = loads(match[1])
         if not isinstance(call, dict) or set(call) != {"name", "arguments"}:
             raise ProtocolError("invalid_tool_call")
         if call["name"] != TOOL_NAME:
             raise ProtocolError("unknown_tool")
         return "search", call["arguments"]
-    final = loads(text)
+    if not re.match(r"^# Analysis[ \t]*\r?\n", text):
+        raise ProtocolError("missing_analysis")
+    match = re.fullmatch(
+        r"(# Analysis[ \t]*\r?\n.+?)\r?\n# Final JSON[ \t]*\r?\n"
+        r"```json[ \t]*\r?\n(.*?)\r?\n```",
+        text,
+        re.S,
+    )
+    if not match:
+        raise ProtocolError("invalid_final_envelope")
+    require_analysis(match[1])
+    final = loads(match[2])
     if (
         not isinstance(final, dict)
         or set(final) != {"translation"}

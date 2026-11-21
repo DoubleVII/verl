@@ -1,4 +1,4 @@
-"""Fail-fast native/Hermes search post-edit rollout; no correction turns or rewards."""
+"""Fail-fast Hermes rollout requiring pilot Analysis/Final JSON on every turn."""
 
 import asyncio
 import copy
@@ -111,6 +111,7 @@ class SearchPostEditAgentLoop(AgentLoopBase):
                     reason = "length_limit"
                     break
                 try:
+                    # Shared pilot parser requires Analysis even on search-call turns.
                     action, value = parse_turn(text)
                     if action == "finish":
                         translation, reason = value, "finished"
