@@ -61,8 +61,8 @@ def loads(text):
 
 
 def validate_budget(max_rounds):
-    if type(max_rounds) is not int or not 0 <= max_rounds <= 2:
-        raise ProtocolError("max_search_rounds_must_be_0_1_or_2")
+    if type(max_rounds) is not int or max_rounds < 0:
+        raise ProtocolError("max_search_rounds_must_be_nonnegative_integer")
 
 
 def validate_queries(arguments, span_count):
@@ -174,7 +174,7 @@ def compact_evidence(payload, span_ids, max_chars=24000):
     if len(rows) != len(span_ids):
         raise ValueError("search_response_span_mismatch")
     evidence, metadata = [], []
-    limits = {"title": 300, "url": 1000, "snippet": 500, "summary": 1600, "content": 3000}
+    limits = {"title": 300, "url": 1000, "snippet": 500, "summary": 3000, "content": 3000}
     truncated = False
     for row, sid in zip(rows, span_ids, strict=False):
         if not isinstance(row, dict) or type(row.get("span_id")) is not int or row["span_id"] != sid:
