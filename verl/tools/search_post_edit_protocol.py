@@ -108,12 +108,75 @@ def require_analysis(text):
     return analysis
 
 
-def parse_turn(content, tool_calls=None):
+def resolve_format(extra=None, *, prompt_type=None, think_tag=None):
+    """Explicit configuration overrides per-record metadata; old records use INST."""
+    extra = extra or {}
+    prompt_type = prompt_type if prompt_type is not None else extra.get('prompt_type', 'inst')
+    think_tag = think_tag if think_tag is not None else extra.get('think_tag', 'think')
+    if prompt_type not in ('inst', 'fit'):
+        raise ValueError('prompt_type must be inst or fit')
+    if not isinstance(think_tag, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*', think_tag):
+        raise ValueError('think_tag must be a bare tag name matching [A-Za-z][A-Za-z0-9_-]*')
+    return prompt_type, think_tag
+
+
+def parse_fit_turn(content, tool_calls=None, *, think_tag='think'):
+    resolve_format(prompt_type='fit', think_tag=think_tag)
+    if not isinstance(content, str):
+        raise ProtocolError('missing_thinking_tags')
+    match = re.fullmatch(
+        rf'\s*<{re.escape(think_tag)}>(.*?)</{re.escape(think_tag)}>\s*(.*)', content, re.S)
+    if not match:
+        raise ProtocolError('missing_thinking_tags')
+    analysis, answer = match[1], match[2].strip()
+    if any(tag in analysis or tag in answer for tag in (f'<{think_tag}>', f'</{think_tag}>')):
+        raise ProtocolError('duplicate_thinking_tags')
+    if tool_calls is not None and not isinstance(tool_calls, list):
+        raise ProtocolError('invalid_tool_calls')
+    if tool_calls:
+        if answer:
+            raise ProtocolError('mixed_tool_call_and_content')
+        if len(tool_calls) != 1:
+            raise ProtocolError('expected_one_batch_call')
+        call = tool_calls[0]
+        if not isinstance(call, dict) or call.get('type', 'function') != 'function':
+            raise ProtocolError('invalid_tool_call')
+        function = call.get('function')
+        if not isinstance(function, dict) or function.get('name') != TOOL_NAME:
+            raise ProtocolError('unknown_tool')
+        arguments = function.get('arguments')
+        arguments = loads(arguments) if isinstance(arguments, str) else arguments
+        if not isinstance(arguments, dict):
+            raise ProtocolError('invalid_batch_parameters')
+        return 'search', arguments
+    if answer.startswith('<tool_call>'):
+        match = re.fullmatch(r'<tool_call>\s*(.*?)\s*</tool_call>', answer, re.S)
+        if not match:
+            raise ProtocolError('expected_one_complete_batch_call')
+        call = loads(match[1])
+        if not isinstance(call, dict) or set(call) != {'name', 'arguments'}:
+            raise ProtocolError('invalid_tool_call')
+        if call['name'] != TOOL_NAME:
+            raise ProtocolError('unknown_tool')
+        if not isinstance(call['arguments'], dict):
+            raise ProtocolError('invalid_batch_parameters')
+        return 'search', call['arguments']
+    final = loads(answer)
+    if (not isinstance(final, dict) or set(final) != {'translation'}
+            or not isinstance(final['translation'], str) or not final['translation'].strip()):
+        raise ProtocolError('invalid_final_translation')
+    return 'finish', final['translation']
+
+
+def parse_turn(content, tool_calls=None, *, prompt_type='inst', think_tag='think'):
     """Pilot envelope: mandatory Analysis, then native call or fenced Final JSON.
 
     Native APIs put Analysis in content and calls in tool_calls. Hermes contains
     both in one generated string. Never repair missing sections or invalid JSON.
     """
+    resolve_format(prompt_type=prompt_type, think_tag=think_tag)
+    if prompt_type == 'fit':
+        return parse_fit_turn(content, tool_calls, think_tag=think_tag)
     if tool_calls is not None and not isinstance(tool_calls, list):
         raise ProtocolError("invalid_tool_calls")
     if tool_calls:

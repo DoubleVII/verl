@@ -1,4 +1,4 @@
-"""Fail-fast Hermes rollout requiring pilot Analysis/Final JSON on every turn."""
+"""Fail-fast Hermes rollout supporting INST or fitted thinking-tag responses."""
 
 import asyncio
 import copy
@@ -15,6 +15,7 @@ from verl.tools.search_post_edit_protocol import (
     ProtocolError,
     loads,
     parse_turn,
+    resolve_format,
     validate_budget,
     validate_queries,
 )
@@ -37,7 +38,7 @@ class SearchPostEditAgentLoop(AgentLoopBase):
                 "Search post-edit learns all assistant turns; use response_mask_mode=all_assistant"
             )
         if rollout.multi_turn.format != "hermes":
-            raise ValueError("SearchPostEditAgentLoop currently supports the INST Hermes format")
+            raise ValueError("SearchPostEditAgentLoop requires the Hermes format")
         path = rollout.multi_turn.tool_config_path
         tools = initialize_tools_from_config(path) if path else []
         if len(tools) != 1 or not isinstance(tools[0], TranslationSearchTool) or tools[0].name != TOOL_NAME:
@@ -48,6 +49,8 @@ class SearchPostEditAgentLoop(AgentLoopBase):
     async def _template(self, messages, **options):
         kwargs = dict(self.config.data.get("apply_chat_template_kwargs", {}))
         kwargs.update(options)
+        if getattr(self, '_prompt_type', 'inst') == 'fit':
+            kwargs['enable_thinking'] = True
         return await asyncio.to_thread(self.tokenizer.apply_chat_template, messages, tokenize=True, **kwargs)
 
     async def run(self, sampling_params, **kwargs):
@@ -58,9 +61,14 @@ class SearchPostEditAgentLoop(AgentLoopBase):
         if len(spans) != extra["span_count"]:
             raise ValueError("span_count metadata mismatch")
         rollout = self.config.actor_rollout_ref.rollout
+        prompt_type, think_tag = resolve_format(extra)
+        self._prompt_type = prompt_type
         response_limit = rollout.response_length
         schema = copy.deepcopy(self.search_tool.tool_schema.model_dump(exclude_none=True))
         schema["function"]["parameters"]["properties"]["queries"]["maxItems"] = max(1, len(spans))
+        if prompt_type == 'fit':
+            schema['function'].pop('strict', None)
+            schema = json.loads(json.dumps(schema, sort_keys=True))
         prompt_ids = await self._template(
             list(kwargs["raw_prompt"]),
             tools=[schema] if spans and max_rounds else [],
@@ -105,14 +113,20 @@ class SearchPostEditAgentLoop(AgentLoopBase):
                 else:
                     logprobs_available = False
                     logprobs.extend([0.0] * len(ids))
-                text = self.tokenizer.decode(ids, skip_special_tokens=True)
+                if prompt_type == 'fit':
+                    # Preserve thinking delimiters even if registered as special tokens.
+                    text = self.tokenizer.decode(ids, skip_special_tokens=False)
+                    eos = getattr(self.tokenizer, 'eos_token', None)
+                    if eos and text.endswith(eos):
+                        text = text[:-len(eos)]
+                else:
+                    text = self.tokenizer.decode(ids, skip_special_tokens=True)
                 trace.append({"role": "assistant", "content": text})
                 if not ids or len(generated.token_ids) >= remaining:
                     reason = "length_limit"
                     break
                 try:
-                    # Shared pilot parser requires Analysis even on search-call turns.
-                    action, value = parse_turn(text)
+                    action, value = parse_turn(text, prompt_type=prompt_type, think_tag=think_tag)
                     if action == "finish":
                         translation, reason = value, "finished"
                         break
@@ -176,5 +190,7 @@ class SearchPostEditAgentLoop(AgentLoopBase):
                 "post_edit_search_rounds": rounds,
                 "post_edit_search_calls": calls,
                 "post_edit_trace": json.dumps(trace, ensure_ascii=False, allow_nan=False),
+                "post_edit_prompt_type": prompt_type,
+                "post_edit_think_tag": think_tag,
             },
         )

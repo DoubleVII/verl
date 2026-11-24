@@ -13,7 +13,7 @@ from reward_utils.rm_lib import (
     REWARD_MODEL_RESPONSES_KEY,
     RewardProcessorOutput,
 )
-from verl.tools.search_post_edit_protocol import ProtocolError, loads, parse_turn
+from verl.tools.search_post_edit_protocol import ProtocolError, loads, parse_turn, resolve_format
 
 REFERENCE_GUIDANCE = (
     "Judge the candidates using the reference translation and expert comments above "
@@ -37,7 +37,7 @@ def reward_context(extra):
     return source, src, tgt, reference, comment
 
 
-def final_translation(fields):
+def final_translation(fields, *, prompt_type='inst', think_tag='think'):
     """Never decode concatenated assistant/tool tokens or fall back to the input candidate."""
     if fields["post_edit_termination"] != "finished":
         return None
@@ -49,16 +49,16 @@ def final_translation(fields):
     )
     if not isinstance(trace, list) or not trace or trace[-1].get("role") != "assistant":
         return None
-    # Recheck every assistant turn: a valid final cannot hide an earlier call
-    # without Analysis (e.g. an old trajectory or incorrectly forged metadata).
+    # Recheck every assistant turn with the selected protocol: a valid final
+    # cannot hide an earlier malformed call or missing analysis envelope.
     assistants = [
         message for message in trace if isinstance(message, dict) and message.get("role") == "assistant"
     ]
     try:
         for message in assistants[:-1]:
-            if parse_turn(message.get("content"))[0] != "search":
+            if parse_turn(message.get("content"), prompt_type=prompt_type, think_tag=think_tag)[0] != "search":
                 return None
-        action, parsed = parse_turn(assistants[-1].get("content"))
+        action, parsed = parse_turn(assistants[-1].get("content"), prompt_type=prompt_type, think_tag=think_tag)
     except (ProtocolError, IndexError):
         return None
     return parsed if action == "finish" and parsed == translation else None
@@ -138,6 +138,9 @@ class SearchPostEditGroupRewardModelProcessor:
         if not getattr(config, "keep_group", False):
             raise ValueError("SearchPostEditGroupRewardModelProcessor requires reward_model.keep_group=true")
         custom = config.custom_processor
+        self.prompt_type = custom.get('prompt_type')
+        self.think_tag = custom.get('think_tag')
+        resolve_format(prompt_type=self.prompt_type, think_tag=self.think_tag)
         self.score_scale_factor = getattr(config, "score_scale_factor", 0.1)
         self.default_reward = getattr(config, "default_reward", 0.0)
         self.singleton_reward = custom.get("singleton_reward", 0.0)
@@ -180,8 +183,17 @@ class SearchPostEditGroupRewardModelProcessor:
                 raise ValueError(f"Conflicting source/reference/comment in reward uid {uid}")
             unique = {}
             for i in indices:
+                prompt_type, think_tag = resolve_format(
+                    nt['extra_info'][i], prompt_type=self.prompt_type, think_tag=self.think_tag)
+                # Loop fields record the actual parser selected from row metadata.
+                # Reward configuration must agree, otherwise do not silently score it.
+                for key, expected_value in (('post_edit_prompt_type', prompt_type), ('post_edit_think_tag', think_tag)):
+                    if key in nt and nt[key][i] != expected_value:
+                        raise ValueError(f'{key} differs between rollout and reward configuration')
                 try:
-                    text = final_translation({k: nt[k][i] for k in required if k.startswith("post_edit_")})
+                    text = final_translation(
+                        {k: nt[k][i] for k in required if k.startswith("post_edit_")},
+                        prompt_type=prompt_type, think_tag=think_tag)
                 except (ValueError, TypeError, AttributeError):
                     text = None
                 if (
